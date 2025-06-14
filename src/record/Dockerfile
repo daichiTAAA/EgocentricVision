@@ -1,5 +1,5 @@
 # Multi-stage build for Record service
-FROM rust:1.82-bookworm AS builder
+FROM rust:1.87.0-bookworm AS builder
 
 # Install system dependencies required for building
 RUN apt-get update && apt-get install -y \
