@@ -6,7 +6,11 @@ RUN apt-get update && apt-get install -y \
     pkg-config \
     libssl-dev \
     ca-certificates \
+    git \
     && rm -rf /var/lib/apt/lists/*
+
+# Configure git to use HTTPS with proper certificates
+RUN git config --global http.sslVerify true
 
 # Set working directory
 WORKDIR /app
@@ -16,8 +20,13 @@ COPY Cargo.toml Cargo.lock ./
 
 # Create a dummy src directory to build dependencies first
 RUN mkdir src && \
-    echo "fn main() {println!(\"If you see this, the build broke\")}" > src/main.rs && \
-    cargo build --release && \
+    echo "fn main() {println!(\"If you see this, the build broke\")}" > src/main.rs
+
+# Configure cargo to use git for dependencies that might have issues
+ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
+
+# Build dependencies only
+RUN cargo build --release && \
     rm -f target/release/deps/record_service*
 
 # Copy actual source code

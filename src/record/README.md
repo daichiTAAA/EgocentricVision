@@ -120,18 +120,43 @@ docker compose down
 docker compose down -v
 ```
 
-## Troubleshooting
+## Known Issues
 
-### Database Connection Issues
-- Ensure PostgreSQL is running: `docker compose ps postgres`
-- Check database logs: `docker compose logs postgres`
-- Verify connection string in configuration
+### Docker Build SSL Certificate Issues
+Currently, there may be SSL certificate issues when building the Docker image in certain environments. If you encounter SSL/TLS errors during the Docker build process:
 
-### Service Won't Start
-- Check service logs: `docker compose logs record-service`
-- Ensure all required environment variables are set
-- Verify port 3000 is not already in use
+1. **Alternative 1**: Build locally and run with Docker
+```bash
+# Build the Rust application locally
+cd src/record
+cargo build --release
 
-### Recording Directory Issues
-- Ensure the recording directory exists and is writable
-- Check volume mounts in docker-compose.yml
+# Then start with Docker Compose (PostgreSQL only)
+cd ../..
+docker compose up -d postgres
+
+# Run the service locally with Docker database
+export RECORD_DATABASE__URL="postgres://user:password@localhost:5432/egocentric_vision"
+cd src/record
+./target/release/record-service
+```
+
+2. **Alternative 2**: Use host networking for Docker build
+```bash
+docker compose build --build-arg BUILDKIT_PROGRESS=plain record-service
+```
+
+3. **Alternative 3**: Wait for network connectivity improvements
+The Docker build should work in environments with proper certificate chains.
+
+### Testing the Setup
+A test script is provided to verify the basic setup:
+```bash
+./test-docker-setup.sh
+```
+
+This validates:
+- PostgreSQL container startup
+- Database connectivity
+- Environment variable configuration
+- Volume mounting

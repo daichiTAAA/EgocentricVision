@@ -1,5 +1,41 @@
 # EgocentricVision
 
+An Egocentric Vision system that provides video stream recording and management capabilities using Raspberry Pi and modern web technologies.
+
+## Architecture
+
+- **Record Service**: Rust-based backend service for RTSP/WebRTC stream recording
+- **Frontend**: Modern web interface for stream management
+- **Mediamtx**: RTSP/WebRTC media server
+
+## Quick Start
+
+### Using Docker Compose
+
+1. Clone the repository:
+```bash
+git clone https://github.com/daichiTAAA/EgocentricVision.git
+cd EgocentricVision
+```
+
+2. Start the services:
+```bash
+docker compose up -d
+```
+
+This will start:
+- PostgreSQL database on port 5432
+- Record service on port 3000
+
+3. Test the setup:
+```bash
+./test-docker-setup.sh
+```
+
+For detailed instructions, see [Record Service README](src/record/README.md).
+
+---
+
 # Raspberry Pi Zero 2 WでのEgocentric Visionシステムのセットアップ手順
 ## Raspberry Pi OSのインストール
 Raspberry Pi Zero 2 WにRaspberry Pi OS(32ビット版)をインストールします。
