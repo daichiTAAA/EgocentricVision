@@ -55,26 +55,42 @@ docker compose logs postgres
 curl http://localhost:3000/health
 ```
 
-### List Recordings
+### Stream Management
 ```bash
-curl http://localhost:3000/api/v1/recordings
-```
-
-### Connect to RTSP Stream
-```bash
+# Connect to RTSP Stream
 curl -X POST http://localhost:3000/api/v1/streams/connect \
   -H "Content-Type: application/json" \
   -d '{"protocol": "rtsp", "url": "rtsp://192.168.0.18:8554/cam"}'
+
+# Check Stream Status
+curl http://localhost:3000/api/v1/streams/status
+
+# Debug Stream Details (includes GStreamer pipeline state)
+curl http://localhost:3000/api/v1/streams/debug
+
+# Disconnect from Stream
+curl -X POST http://localhost:3000/api/v1/streams/disconnect
 ```
 
-### Start Recording
+### Recording Management
 ```bash
+# Start Recording
 curl -X POST http://localhost:3000/api/v1/recordings/start
-```
 
-### Stop Recording
-```bash
-curl -X POST http://localhost:3000/api/v1/recordings/{id}/stop
+# Stop Recording
+curl -X POST http://localhost:3000/api/v1/recordings/stop
+
+# List Recordings
+curl http://localhost:3000/api/v1/recordings
+
+# Get Recording Details
+curl http://localhost:3000/api/v1/recordings/{id}
+
+# Download Recording
+curl http://localhost:3000/api/v1/recordings/{id}/download
+
+# Delete Recording
+curl -X DELETE http://localhost:3000/api/v1/recordings/{id}
 ```
 
 ## API利用時の注意
@@ -97,6 +113,40 @@ curl -X POST http://localhost:3000/api/v1/recordings/start
 > 事前にストリーム接続せずに録画開始APIを呼ぶと、
 > `{ "error_code": "NOT_CONNECTED", "message": "Not connected to stream" }`
 > というエラーが返ります。
+
+### 0バイトMP4ファイル問題のトラブルシューティング
+
+録画ファイルが0バイトで作成される場合は、以下を確認してください：
+
+1. **RTSPストリームの確認**
+```bash
+# コマンドラインでGStreamerを直接テスト
+./debug-gstreamer.sh rtsp://192.168.0.18:8554/cam
+
+# または手動で実行
+gst-launch-1.0 -e rtspsrc location=rtsp://192.168.0.18:8554/cam latency=0 timeout=20 ! rtph264depay ! h264parse ! mp4mux ! filesink location=/tmp/test.mp4
+```
+
+2. **ストリーム状態の詳細確認**
+```bash
+# 基本ステータス確認
+curl http://localhost:3000/api/v1/streams/status
+
+# 詳細デバッグ情報（GStreamerパイプライン状態含む）
+curl http://localhost:3000/api/v1/streams/debug
+```
+
+3. **よくある原因と対処法**
+- **RTSP URLが無効**: ネットワーク疎通とRTSPサーバーの動作を確認
+- **H264以外のコーデック**: H264エンコードされていないストリームは非対応
+- **ネットワークタイムアウト**: ファイアウォールやDocker設定を確認
+- **GStreamerエラー**: ログで`GStreamer Error`や`GStreamer Warning`を確認
+
+4. **ログレベルの変更**
+Docker環境変数に以下を追加してより詳細なログを出力：
+```bash
+RUST_LOG=debug
+```
 
 ### Dockerコンテナからのネットワーク疎通
 
