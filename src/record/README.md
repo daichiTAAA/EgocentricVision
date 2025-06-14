@@ -108,9 +108,7 @@ curl -X POST http://localhost:3000/api/v1/recordings/start \
 - 必要に応じて、コンテナ内で下記のように疎通確認してください。
 
 ```bash
-docker compose exec record-service apt update && apt install -y netcat
-# コンテナ内で
-nc -vz 192.168.0.18 8554
+docker compose exec record-service nc -vz 192.168.0.18 8554
 ```
 
 ### RTSPストリームの確認
