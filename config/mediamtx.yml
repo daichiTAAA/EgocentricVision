@@ -59,16 +59,17 @@ authInternalUsers:
   # IPs or networks allowed to use this user. An empty list means any IP.
   ips: []
   # List of permissions.
-  # Available actions are: publish, read, playback, api, metrics, pprof.
-  - action: publish
-    # Paths can be set to further restrict access to a specific path.
-    # An empty path means any path.
-    # Regular expressions can be used by using a tilde as prefix.
-    path:
-  - action: read
-    path:
-  - action: playback
-    path:
+  permissions:
+    # Available actions are: publish, read, playback, api, metrics, pprof.
+    - action: publish
+      # Paths can be set to further restrict access to a specific path.
+      # An empty path means any path.
+      # Regular expressions can be used by using a tilde as prefix.
+      path:
+    - action: read
+      path:
+    - action: playback
+      path:
 
   # Default administrator.
   # This allows to use API, metrics and PPROF without authentication,
