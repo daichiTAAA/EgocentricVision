@@ -97,3 +97,36 @@ Raspberry Pi Zero 2 W の Raspberry Pi OS で Mediamtx を最新版にインス�
    sudo systemctl enable mediamtx
    sudo systemctl disable mediamtx
    ```
+
+---
+
+## ストリームの受信方法
+
+### RTSPストリームの受信
+
+Mediamtxのデフォルト設定では、Raspberry Pi Cameraのストリームは以下のURLで受信できます。
+
+- RTSP URL例:
+  
+  ```
+  rtsp://<RaspberryPiのIPアドレス>:8554/
+  ```
+  
+  - VLCやffmpegなどのRTSPクライアントで再生可能です。
+
+### WebRTCストリームの受信（ブラウザ）
+
+MediamtxはWebRTCの簡易プレイヤーを内蔵しています。
+
+- WebRTC視聴用URL:
+  
+  ```
+  http://<RaspberryPiのIPアドレス>:8889/
+  ```
+  
+  - ブラウザで上記URLにアクセスし、ストリーム名（例: `/`）を入力して再生できます。
+  - 例: `http://<RaspberryPiのIPアドレス>:8889/` → ページ上部のフォームに `/` を入力し「play」ボタンを押す
+
+#### 注意
+- `<RaspberryPiのIPアドレス>`は実際のIPアドレスに置き換えてください。
+- ファイアウォールやネットワーク設定により外部からアクセスできない場合があります。

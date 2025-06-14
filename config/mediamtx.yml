@@ -59,8 +59,7 @@ authInternalUsers:
   # IPs or networks allowed to use this user. An empty list means any IP.
   ips: []
   # List of permissions.
-  permissions:
-    # Available actions are: publish, read, playback, api, metrics, pprof.
+  # Available actions are: publish, read, playback, api, metrics, pprof.
   - action: publish
     # Paths can be set to further restrict access to a specific path.
     # An empty path means any path.
@@ -440,7 +439,7 @@ pathDefaults:
   # * $MTX_QUERY: query parameters (passed by first reader)
   # * $G1, $G2, ...: regular expression groups, if path name is
   #   a regular expression.
-  source: publisher
+  source: rpiCamera
   # If the source is a URL, and the source certificate is self-signed
   # or invalid, you can provide the fingerprint of the certificate in order to
   # validate it anyway. It can be obtained by running:
@@ -464,6 +463,7 @@ pathDefaults:
   # It can be can be a relative path (i.e. /otherstream) or an absolute RTSP URL.
   fallback:
   # Route original absolute timestamps of RTSP and WebRTC frames, instead of replacing them.
+  # This can be used to troubleshoot playback issues.
   useAbsoluteTimestamp: false
 
   ###############################################
@@ -533,9 +533,9 @@ pathDefaults:
   # Whether this is a secondary stream.
   rpiCameraSecondary: false
   # Width of frames.
-  rpiCameraWidth: 1920
+  rpiCameraWidth: 1280
   # Height of frames.
-  rpiCameraHeight: 1080
+  rpiCameraHeight: 720
   # Flip horizontally.
   rpiCameraHFlip: false
   # Flip vertically.
@@ -572,7 +572,7 @@ pathDefaults:
   # Region of interest, in format x,y,width,height (all normalized between 0 and 1).
   rpiCameraROI:
   # Whether to enable HDR on Raspberry Camera 3.
-  rpiCameraHDR: false
+  rpiCameraHDR: true
   # Tuning file.
   rpiCameraTuningFile:
   # Sensor mode, in format [width]:[height]:[bit-depth]:[packing]
