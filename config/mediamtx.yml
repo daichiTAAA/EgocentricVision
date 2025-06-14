@@ -725,7 +725,7 @@ paths:
   # my_camera:
   #   source: rtsp://my_camera
   cam:  # パス名は何でもOKです（例: my-camera, v3-streamなど）
-    runOnDemand: yes
+    runOnDemand: "yes"
     source: exec
     sourceOnDemand: >-
       libcamera-vid
