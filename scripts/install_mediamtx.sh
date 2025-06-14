@@ -3,10 +3,10 @@
 
 set -e
 
-# 1. 最新版のダウンロード
-wget -O mediamtx-linux-armv7.tar.gz "https://github.com/bluenviron/mediamtx/releases/latest/download/mediamtx-linux-armv7.tar.gz"
+# 1. ダウンロード
+wget -O mediamtx_v1.12.3_linux_armv6.tar.gz "https://github.com/bluenviron/mediamtx/releases/download/v1.12.3/mediamtx_v1.12.3_linux_armv6.tar.gz"
 
-tar -xzf mediamtx-linux-armv7.tar.gz
+tar -xzf mediamtx_v1.12.3_linux_armv6.tar.gz
 
 # 2. バイナリの移動と権限付与
 sudo mv mediamtx /usr/local/bin/
