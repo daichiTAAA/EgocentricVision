@@ -13,7 +13,7 @@ Description=Mediamtx Service
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/mediamtx -config /home/%u/EgocentricVision/config/mediamtx.yml
+ExecStart=/usr/local/bin/mediamtx -config /home/${USER}/EgocentricVision/config/mediamtx.yml
 Restart=always
 User=${USER}
 Group=${GROUP}
