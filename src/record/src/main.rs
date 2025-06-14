@@ -10,7 +10,8 @@ use anyhow::Result;
 use config::Config;
 use database::Database;
 use std::sync::Arc;
-use tracing::{info, error};
+use tokio::time::{sleep, Duration};
+use tracing::{info, error, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -27,11 +28,33 @@ async fn main() -> Result<()> {
         e
     })?;
 
-    // Initialize database
-    let database = Database::new(&config.database.url).await.map_err(|e| {
-        error!("Failed to initialize database: {}", e);
-        e
-    })?;
+    // Initialize database with retry logic
+    let database = {
+        let mut attempts = 0;
+        let max_attempts = 5; // 最大5回まで試行
+        let retry_delay = Duration::from_secs(5); // 5秒待ってリトライ
+
+        loop {
+            attempts += 1;
+            match Database::new(&config.database.url).await {
+                Ok(db) => {
+                    info!("Successfully connected to the database.");
+                    break db;
+                }
+                Err(e) => {
+                    if attempts >= max_attempts {
+                        error!("Failed to initialize database after {} attempts: {}", attempts, e);
+                        return Err(e.into());
+                    }
+                    warn!(
+                        "Failed to initialize database (attempt {}/{}). Retrying in {:?}... Error: {}",
+                        attempts, max_attempts, retry_delay, e
+                    );
+                    sleep(retry_delay).await;
+                }
+            }
+        }
+    };
 
     // Run migrations
     database.migrate().await.map_err(|e| {

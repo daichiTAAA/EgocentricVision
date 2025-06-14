@@ -6,7 +6,7 @@ recording_directory: /var/data/recordings
 # Database configuration
 database:
   # PostgreSQL connection URL
-  url: "postgres://user:password@localhost:5432/egocentric_vision"
+  url: "postgres://user:password@postgres:5432/egocentric_vision"
 
 # Stream configuration
 stream:

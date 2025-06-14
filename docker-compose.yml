@@ -10,10 +10,12 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U user -d egocentric_vision"]
-      interval: 10s
+      # pg_isready に -q (quiet) を追加して成功時/失敗時の出力を抑制
+      test: ["CMD-SHELL", "pg_isready -U user -d egocentric_vision -q"]
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 10s  # 起動後、最初の10秒間は失敗しても異常と見なさない猶予期間
 
   record-service:
     build:
@@ -22,13 +24,11 @@ services:
     ports:
       - "3000:3000"
     environment:
-      # Override database URL to point to the postgres container
       RECORD_DATABASE__URL: "postgres://user:password@postgres:5432/egocentric_vision"
-      # Override recording directory for container
       RECORD_RECORDING_DIRECTORY: "/var/data/recordings"
     volumes:
       - ./config:/app/config:ro
-      - recordings_data:/var/data/recordings
+      - ./recordings_data:/var/data/recordings
     depends_on:
       postgres:
         condition: service_healthy
@@ -36,4 +36,4 @@ services:
 
 volumes:
   postgres_data:
-  recordings_data:
+  # recordings_data:
