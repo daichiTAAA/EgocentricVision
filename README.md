@@ -50,45 +50,50 @@ Raspberry Pi Zero 2 W の Raspberry Pi OS で Mediamtx を最新版にインス�
 
    ```sh
    chmod +x ./scripts/install_mediamtx.sh
+   chmod +x ./scripts/setup_mediamtx_service.sh
    ```
 
-2. スクリプトを実行して、Mediamtx をインストールします。
+2. Mediamtx をインストールします。
 
    ```sh
    ./scripts/install_mediamtx.sh
    ```
-3. インストールが完了したら、Mediamtx を起動します。
+
+3. systemdサービスを設定・有効化します。
 
    ```sh
-   sudo systemctl start mediamtx
+   ./scripts/setup_mediamtx_service.sh
    ```
+
 4. Mediamtx のステータスを確認します。
 
    ```sh
    sudo systemctl status mediamtx
    ```
+
 5. Mediamtx のログを確認します。
 
    ```sh
    sudo journalctl -u mediamtx -f
    ```
-6. Mediamtx の設定ファイルを編集します。
+
+6. Mediamtx の設定ファイルを編集します（例: /home/pi/mediamtx.yml など）。
 
    ```sh
-   sudo nano /etc/mediamtx/mediamtx.conf
+   nano /home/$USER/EgocentricVision/mediamtx.yml
    ```
+
+   ※ systemdサービスのWorkingDirectoryや-cオプションで指定したパスに合わせて編集してください。
+
 7. 設定ファイルを編集したら、Mediamtx を再起動します。
 
    ```sh
    sudo systemctl restart mediamtx
    ```
-8. Mediamtx の自動起動を有効にします。
+
+8. Mediamtx の自動起動を有効/無効にする場合は、以下のコマンドを実行します。
 
    ```sh
    sudo systemctl enable mediamtx
-   ```
-9. Mediamtx の自動起動を無効にする場合は、以下のコマンドを実行します。
-
-   ```sh
    sudo systemctl disable mediamtx
    ```
