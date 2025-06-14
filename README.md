@@ -15,12 +15,12 @@ Raspberry Pi OSでは、`/etc/dhcpcd.conf`ファイルを編集してIPアドレ
 
 2. ファイルの末尾に以下のように追記します（例: 有線LANの場合は`eth0`、無線LANの場合は`wlan0`）：
 
-   ```
-   interface eth0
-   static ip_address=192.168.1.100/24
-   static routers=192.168.1.1
-   static domain_name_servers=8.8.8.8 8.8.4.4
-   ```
+```
+interface wlan0
+static ip_address=192.168.1.100/24
+static routers=192.168.0.1
+static domain_name_servers=8.8.8.8 8.8.4.4
+```
    - `interface`：設定したいインターフェース名（`ip a`コマンドで確認可能）
    - `static ip_address`：割り当てたい固定IPアドレス（例: 192.168.1.100/24）
    - `static routers`：ルーター（ゲートウェイ）アドレス
