@@ -54,3 +54,10 @@ pub async fn status(
     let status: StreamStatus = (&state).into();
     Ok(Json(status))
 }
+
+pub async fn debug_status(
+    State(app_state): State<Arc<AppState>>,
+) -> Result<String, RecordError> {
+    let detailed_status = app_state.stream_manager.get_detailed_status().await;
+    Ok(detailed_status)
+}

@@ -35,6 +35,7 @@ fn create_router(app_state: Arc<AppState>) -> Router {
         .route("/api/v1/streams/connect", post(handlers::streams::connect))
         .route("/api/v1/streams/disconnect", post(handlers::streams::disconnect))
         .route("/api/v1/streams/status", get(handlers::streams::status))
+        .route("/api/v1/streams/debug", get(handlers::streams::debug_status))
         .route("/api/v1/recordings/start", post(handlers::recordings::start))
         .route("/api/v1/recordings/stop", post(handlers::recordings::stop))
         .route("/api/v1/recordings", get(handlers::recordings::list))
