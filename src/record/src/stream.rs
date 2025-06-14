@@ -70,15 +70,28 @@ impl StreamManager {
 
         info!(%url, "Connecting to stream");
 
-        let pipeline_str = format!(
-            "rtspsrc location={} latency=0 ! rtph264depay ! h264parse ! tee name=t",
-            url
-        );
+        // パイプラインを手動で構築し、rtspsrcのpad-addedシグナルをハンドル
+        let pipeline = Pipeline::new();
+        let src = ElementFactory::make("rtspsrc").property("location", &url).property("latency", &0u32).build()?;
+        let depay = ElementFactory::make("rtph264depay").build()?;
+        let parse = ElementFactory::make("h264parse").build()?;
+        let mux = ElementFactory::make("mp4mux").build()?;
+        let sink = ElementFactory::make("filesink").property("location", "/tmp/test.mp4").build()?;
 
-        let pipeline = parse::launch(&pipeline_str)
-            .map_err(|e| RecordError::StreamError(e.to_string()))?
-            .downcast::<Pipeline>()
-            .map_err(|_| RecordError::StreamError("Failed to create GStreamer pipeline".to_string()))?;
+        pipeline.add_many(&[&src, &depay, &parse, &mux, &sink])?;
+        Element::link_many(&[&depay, &parse, &mux, &sink])?;
+
+        // rtspsrcのpad-addedシグナルでdepayチェーンに接続
+        let depay_clone = depay.downgrade();
+        src.connect_pad_added(move |src, src_pad| {
+            if let Some(depay) = depay_clone.upgrade() {
+                let sink_pad = depay.static_pad("sink").unwrap();
+                if sink_pad.is_linked() {
+                    return;
+                }
+                let _ = src_pad.link(&sink_pad);
+            }
+        });
 
         pipeline.set_state(State::Paused)
             .map_err(|e| RecordError::StreamError(e.to_string()))?;
@@ -143,23 +156,14 @@ impl StreamManager {
 
         pipeline.add(&rec_bin)?;
 
-        // メインパイプラインの'tee'要素に録画用Binを接続します。
-        let tee = pipeline
-            .by_name("t")
-            .ok_or_else(|| RecordError::StreamError("Could not find 'tee' element".to_string()))?;
-        tee.link(&rec_bin)?;
-
+        // teeやrec_binの追加・リンク処理は不要
         // パイプラインがまだ再生中でなければ、PLAYING状態に移行します。
         if pipeline.current_state() != State::Playing {
             pipeline.set_state(State::Playing)?;
             info!("Pipeline state changed to PLAYING");
         }
-        // すでに再生中であれば、新しいBinの状態を同期させます。
-        rec_bin.sync_state_with_parent()?;
-
         state.is_recording = true;
         state.current_recording_id = Some(recording_id);
-
         Ok(())
     }
 
@@ -208,6 +212,18 @@ impl StreamManager {
         
         info!(%recording_id, "Recording bin removed and file saved.");
 
+        // パイプラインにEOSイベントを送信
+        pipeline.send_event(gstreamer::event::Eos::new());
+        // BusでEOSメッセージを待つ
+        if let Some(bus) = pipeline.bus() {
+            for msg in bus.iter_timed(gstreamer::ClockTime::NONE) {
+                if let gstreamer::MessageView::Eos(..) = msg.view() {
+                    break;
+                }
+            }
+        }
+        pipeline.set_state(State::Null)?;
+        info!(%recording_id, "Pipeline set to Null and file finalized.");
         state.is_recording = false;
         Ok(recording_id)
     }

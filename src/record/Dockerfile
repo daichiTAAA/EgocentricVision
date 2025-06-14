@@ -49,6 +49,7 @@ RUN apt-get update && apt-get install -y \
     gstreamer1.0-plugins-good \
     gstreamer1.0-plugins-bad \
     gstreamer1.0-libav \
+    gstreamer1.0-plugins-ugly \
     && rm -rf /var/lib/apt/lists/*
 
 # Create app user

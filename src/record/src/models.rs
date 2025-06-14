@@ -17,7 +17,7 @@ pub struct Recording {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq, Eq)]
 #[sqlx(type_name = "recording_status", rename_all = "UPPERCASE")]
 pub enum RecordingStatus {
     Recording,

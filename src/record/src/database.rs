@@ -32,7 +32,7 @@ impl Database {
         file_path: String,
         start_time: DateTime<Utc>,
     ) -> Result<Recording, RecordError> {
-        let status = "RECORDING";
+        let status = RecordingStatus::Recording;
         let row = sqlx::query(
             r#"
             INSERT INTO recordings (id, file_name, file_path, start_time, status, created_at, updated_at)
@@ -57,12 +57,7 @@ impl Database {
             end_time: row.get("end_time"),
             duration_seconds: row.get("duration_seconds"),
             file_size_bytes: row.get("file_size_bytes"),
-            status: match row.get::<String, _>("status").as_str() {
-                "RECORDING" => RecordingStatus::Recording,
-                "COMPLETED" => RecordingStatus::Completed,
-                "FAILED" => RecordingStatus::Failed,
-                _ => RecordingStatus::Failed,
-            },
+            status: row.get("status"),
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
         };
@@ -77,7 +72,7 @@ impl Database {
         duration_seconds: i64,
         file_size_bytes: i64,
     ) -> Result<Recording, RecordError> {
-        let status = "COMPLETED";
+        let status = RecordingStatus::Completed;
         let row = sqlx::query(
             r#"
             UPDATE recordings 
@@ -104,12 +99,7 @@ impl Database {
             end_time: row.get("end_time"),
             duration_seconds: row.get("duration_seconds"),
             file_size_bytes: row.get("file_size_bytes"),
-            status: match row.get::<String, _>("status").as_str() {
-                "RECORDING" => RecordingStatus::Recording,
-                "COMPLETED" => RecordingStatus::Completed,
-                "FAILED" => RecordingStatus::Failed,
-                _ => RecordingStatus::Failed,
-            },
+            status: row.get("status"),
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
         };
@@ -117,9 +107,8 @@ impl Database {
         Ok(recording)
     }
 
-    /*
     pub async fn update_recording_failed(&self, id: Uuid) -> Result<Recording, RecordError> {
-        let status = "FAILED";
+        let status = RecordingStatus::Failed;
         let row = sqlx::query(
             r#"
             UPDATE recordings 
@@ -142,19 +131,13 @@ impl Database {
             end_time: row.get("end_time"),
             duration_seconds: row.get("duration_seconds"),
             file_size_bytes: row.get("file_size_bytes"),
-            status: match row.get::<String, _>("status").as_str() {
-                "RECORDING" => RecordingStatus::Recording,
-                "COMPLETED" => RecordingStatus::Completed,
-                "FAILED" => RecordingStatus::Failed,
-                _ => RecordingStatus::Failed,
-            },
+            status: row.get("status"),
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
         };
 
         Ok(recording)
     }
-    */
 
     pub async fn get_recording(&self, id: Uuid) -> Result<Recording, RecordError> {
         let row = sqlx::query(

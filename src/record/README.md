@@ -60,6 +60,13 @@ curl http://localhost:3000/health
 curl http://localhost:3000/api/v1/recordings
 ```
 
+### Connect to RTSP Stream
+```bash
+curl -X POST http://localhost:3000/api/v1/streams/connect \
+  -H "Content-Type: application/json" \
+  -d '{"protocol": "rtsp", "url": "rtsp://192.168.0.18:8554/cam"}'
+```
+
 ### Start Recording
 ```bash
 curl -X POST http://localhost:3000/api/v1/recordings/start \
@@ -71,6 +78,48 @@ curl -X POST http://localhost:3000/api/v1/recordings/start \
 ```bash
 curl -X POST http://localhost:3000/api/v1/recordings/{id}/stop
 ```
+
+## API利用時の注意
+
+### ストリーム接続と録画開始の手順
+
+録画を開始するには、必ず事前にストリーム接続APIを呼び出してください。
+
+1. **ストリーム接続**
+```bash
+curl -X POST http://localhost:3000/api/v1/streams/connect \
+  -H "Content-Type: application/json" \
+  -d '{"protocol": "rtsp", "url": "rtsp://192.168.0.18:8554/cam"}'
+```
+2. **録画開始**
+```bash
+curl -X POST http://localhost:3000/api/v1/recordings/start \
+  -H "Content-Type: application/json" \
+  -d '{"rtsp_url": "rtsp://192.168.0.18:8554/cam"}'
+```
+
+> 事前にストリーム接続せずに録画開始APIを呼ぶと、
+> `{ "error_code": "NOT_CONNECTED", "message": "Not connected to stream" }`
+> というエラーが返ります。
+
+### Dockerコンテナからのネットワーク疎通
+
+- ホストOSで `nc -vz 192.168.0.18 8554` が成功しても、Dockerコンテナ内から同じIPにアクセスできるとは限りません。
+- 必要に応じて、コンテナ内で下記のように疎通確認してください。
+
+```bash
+docker compose exec record-service apt update && apt install -y netcat
+# コンテナ内で
+nc -vz 192.168.0.18 8554
+```
+
+### RTSPストリームの確認
+- RTSPストリームを受信しmp4ファイルが保存されるか確認するためには、以下のコマンドを実行してみてください。
+```bash
+gst-launch-1.0 -e rtspsrc location=rtsp://192.168.0.18:8554/cam latency=0 ! rtph264depay ! h264parse ! mp4mux ! filesink location=test.mp4
+```
+
+- ファイアウォールやDockerネットワーク設定によっては外部アクセスが制限されている場合があります。
 
 ## Configuration
 
