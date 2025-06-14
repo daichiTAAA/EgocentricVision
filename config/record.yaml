@@ -11,7 +11,7 @@ database:
 # Stream configuration
 stream:
   # Default RTSP URL (optional)
-  default_rtsp_url: "rtsp://127.0.0.1:8554/stream"
+  default_rtsp_url: "rtsp://192.168.0.18:8554/cam"
 
 # Server configuration
 server:
