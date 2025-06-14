@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::error::RecordError;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -22,6 +23,7 @@ pub struct StreamState {
     pub protocol: Option<String>,
     pub url: Option<String>,
     pub current_recording_id: Option<Uuid>,
+    pub is_tee_ready: bool, // 追加
 }
 
 /// GStreamerパイプラインとストリーム状態を管理します。
@@ -32,7 +34,8 @@ pub struct StreamManager {
     // tee要素を保持するためのフィールドを追加
     tee: Arc<Mutex<Option<Element>>>,
     config: Config,
-    recording_pads: Arc<Mutex<HashMap<Uuid, gstreamer::Pad>>>, // 追加
+    recording_pads: Arc<Mutex<HashMap<Uuid, gstreamer::Pad>>>,
+    is_tee_ready: Arc<AtomicBool>, // 追加
 }
 
 impl StreamManager {
@@ -46,7 +49,8 @@ impl StreamManager {
             pipeline: Arc::new(Mutex::new(None)),
             tee: Arc::new(Mutex::new(None)),
             config,
-            recording_pads: Arc::new(Mutex::new(HashMap::new())), // 追加
+            recording_pads: Arc::new(Mutex::new(HashMap::new())),
+            is_tee_ready: Arc::new(AtomicBool::new(false)), // 追加
         }
     }
 
@@ -73,16 +77,26 @@ impl StreamManager {
 
         info!(%url, "Connecting to stream and creating base pipeline");
 
-        // パイプラインを構築: rtspsrc -> ... -> tee
+        // パイプラインを構築: rtspsrc -> rtph264depay -> h264parse -> tee
         let pipeline = Pipeline::new();
         let src = ElementFactory::make("rtspsrc")
             .property("location", &url)
             .property("latency", &0u32)
             .build()?;
+        let depay = ElementFactory::make("rtph264depay").build()?;
+        let parse = ElementFactory::make("h264parse").build()?;
         let tee = ElementFactory::make("tee").name("t").build()?;
-        pipeline.add_many(&[&src, &tee])?;
+        pipeline.add_many(&[&src, &depay, &parse, &tee])?;
+        // h264parse→teeのリンク時にcapフィルタを使用
+        use gstreamer::Caps;
+        let caps = Caps::builder("video/x-h264")
+            .field("stream-format", &"avc")
+            .field("alignment", &"au")
+            .build();
+        Element::link_many(&[&depay, &parse])?;
+        parse.link_filtered(&tee, &caps)?;
 
-        // bus監視を追加
+        // bus監視を追加（StateChangedも全要素で出す）
         let bus = pipeline.bus().unwrap();
         let _ = bus.add_watch(move |_, msg| {
             use gstreamer::MessageView;
@@ -107,9 +121,10 @@ impl StreamManager {
                     debug!("Received EOS");
                 }
                 MessageView::StateChanged(state_changed) => {
-                    if state_changed.src().map_or(false, |s| s.is::<gstreamer::Pipeline>()) {
+                    if let Some(src) = state_changed.src() {
                         debug!(
-                            "Pipeline state changed from {:?} to {:?} to {:?}",
+                            "Element {} state changed from {:?} to {:?} to {:?}",
+                            src.path_string(),
                             state_changed.old(),
                             state_changed.current(),
                             state_changed.pending()
@@ -122,12 +137,10 @@ impl StreamManager {
         }).expect("Failed to add bus watch");
 
         // pipeline_weakを事前に作成し、クロージャにはそれだけmoveする
-        let pipeline_weak = pipeline.downgrade();
-        let tee_clone = tee.clone();
+        let depay_clone = depay.clone();
+        let is_tee_ready_clone = self.is_tee_ready.clone();
         src.connect_pad_added(move |src_elem, src_pad| {
             info!("Received new pad '{}' from '{}'", src_pad.name(), src_elem.name());
-
-            // --- ここからcaps判定を追加 ---
             let new_pad_caps = match src_pad.current_caps() {
                 Some(caps) => caps,
                 None => {
@@ -143,30 +156,23 @@ impl StreamManager {
                 }
             };
             info!("New pad created with caps: {}", new_pad_struct.to_string());
-            // H.264ビデオのみリンク
             if new_pad_struct.name() == "application/x-rtp"
                 && new_pad_struct.get::<&str>("media").unwrap_or("") == "video"
                 && new_pad_struct.get::<&str>("encoding-name").unwrap_or("") == "H264"
             {
-                let sink_pad = tee_clone.static_pad("sink").expect("Tee should have a sink pad");
-                if sink_pad.is_linked() {
-                    info!("Tee sink pad is already linked. Ignoring.");
+                let depay_sink = depay_clone.static_pad("sink").unwrap();
+                if depay_sink.is_linked() {
+                    warn!("Depay sink pad already linked. Ignoring.");
                     return;
                 }
-                let depay = ElementFactory::make("rtph264depay").build().unwrap();
-                let parse = ElementFactory::make("h264parse").build().unwrap();
-                if let Some(p) = pipeline_weak.upgrade() {
-                    p.add_many(&[&depay, &parse]).unwrap();
-                    Element::link_many(&[&depay, &parse, &tee_clone]).unwrap();
-                    src_pad.link(&depay.static_pad("sink").unwrap()).unwrap();
-                    depay.sync_state_with_parent().unwrap();
-                    parse.sync_state_with_parent().unwrap();
-                    info!("Successfully linked H.264 video stream.");
+                match src_pad.link(&depay_sink) {
+                    Ok(_) => info!("Linked src_pad to depay sink"),
+                    Err(e) => error!("Failed to link src_pad to depay sink: {:?}", e),
                 }
+                is_tee_ready_clone.store(true, Ordering::SeqCst); // ここでセット
             } else {
                 info!("Ignoring non-H264 video pad.");
             }
-            // --- ここまでcaps判定 ---
         });
 
         // パイプラインをPLAYINGに設定してストリーム受信を開始
@@ -179,12 +185,13 @@ impl StreamManager {
         state.is_connected = true;
         state.protocol = Some(protocol);
         state.url = Some(url.clone());
+        self.is_tee_ready.store(false, Ordering::SeqCst); // 初期化
         Ok(())
     }
 
     /// 録画を開始します。
     pub async fn start_recording(&self, recording_id: Uuid) -> Result<(), RecordError> {
-        let mut state = self.state.lock().await;
+        let state = self.state.lock().await;
         
         if !state.is_connected {
             return Err(RecordError::NotConnected);
@@ -192,6 +199,17 @@ impl StreamManager {
         if state.is_recording {
             return Err(RecordError::AlreadyRecording);
         }
+        drop(state); // ここで一度ロックを外す
+        // teeまでのリンクが完了するまで待機
+        let mut wait_count = 0;
+        while !self.is_tee_ready.load(Ordering::SeqCst) {
+            if wait_count > 20 {
+                return Err(RecordError::StreamError("Tee is not ready for recording".into()));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            wait_count += 1;
+        }
+        let mut state = self.state.lock().await;
 
         let pipeline_lock = self.pipeline.lock().await;
         let pipeline = pipeline_lock.as_ref().ok_or_else(|| RecordError::StreamError("Pipeline not found".into()))?;
@@ -212,11 +230,17 @@ impl StreamManager {
         let rec_bin = {
             let bin = Bin::with_name(&rec_bin_name);
             let queue = ElementFactory::make("queue").build()?;
+            let capsfilter = ElementFactory::make("capsfilter")
+                .property("caps", &gstreamer::Caps::builder("video/x-h264")
+                    .field("stream-format", &"avc")
+                    .field("alignment", &"au")
+                    .build())
+                .build()?;
             let mux = ElementFactory::make("mp4mux").build()?;
             let sink = ElementFactory::make("filesink").property("location", location).build()?;
 
-            bin.add_many(&[&queue, &mux, &sink])?;
-            Element::link_many(&[&queue, &mux, &sink])?;
+            bin.add_many(&[&queue, &capsfilter, &mux, &sink])?;
+            Element::link_many(&[&queue, &capsfilter, &mux, &sink])?;
 
             let pad = queue.static_pad("sink").ok_or_else(|| RecordError::StreamError("Queue has no sink pad".into()))?;
             let ghost_pad = GhostPad::with_target(&pad)?;
