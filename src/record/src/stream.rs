@@ -12,6 +12,7 @@ use gstreamer::{
 use tracing::{info, warn, error, debug};
 use crate::models::StreamStatus;
 use glib::BoolError;
+use std::collections::HashMap;
 
 /// ストリームの論理的な状態を保持します。
 #[derive(Debug, Clone, Default)]
@@ -31,6 +32,7 @@ pub struct StreamManager {
     // tee要素を保持するためのフィールドを追加
     tee: Arc<Mutex<Option<Element>>>,
     config: Config,
+    recording_pads: Arc<Mutex<HashMap<Uuid, gstreamer::Pad>>>, // 追加
 }
 
 impl StreamManager {
@@ -42,8 +44,9 @@ impl StreamManager {
         Self {
             state: Arc::new(Mutex::new(StreamState::default())),
             pipeline: Arc::new(Mutex::new(None)),
-            tee: Arc::new(Mutex::new(None)), // teeを初期化
+            tee: Arc::new(Mutex::new(None)),
             config,
+            recording_pads: Arc::new(Mutex::new(HashMap::new())), // 追加
         }
     }
 
@@ -77,8 +80,46 @@ impl StreamManager {
             .property("latency", &0u32)
             .build()?;
         let tee = ElementFactory::make("tee").name("t").build()?;
-
         pipeline.add_many(&[&src, &tee])?;
+
+        // bus監視を追加
+        let bus = pipeline.bus().unwrap();
+        let _ = bus.add_watch(move |_, msg| {
+            use gstreamer::MessageView;
+            match msg.view() {
+                MessageView::Error(err) => {
+                    error!(
+                        "Error from element {}: {} ({})",
+                        err.src().map_or_else(|| "None".to_string(), |s| s.path_string().to_string()),
+                        err.error(),
+                        err.debug().unwrap_or_default()
+                    );
+                }
+                MessageView::Warning(warn) => {
+                    warn!(
+                        "Warning from element {}: {} ({})",
+                        warn.src().map_or_else(|| "None".to_string(), |s| s.path_string().to_string()),
+                        warn.error(),
+                        warn.debug().unwrap_or_default()
+                    );
+                }
+                MessageView::Eos(..) => {
+                    debug!("Received EOS");
+                }
+                MessageView::StateChanged(state_changed) => {
+                    if state_changed.src().map_or(false, |s| s.is::<gstreamer::Pipeline>()) {
+                        debug!(
+                            "Pipeline state changed from {:?} to {:?} to {:?}",
+                            state_changed.old(),
+                            state_changed.current(),
+                            state_changed.pending()
+                        );
+                    }
+                }
+                _ => (),
+            }
+            glib::ControlFlow::Continue
+        }).expect("Failed to add bus watch");
 
         // pipeline_weakを事前に作成し、クロージャにはそれだけmoveする
         let pipeline_weak = pipeline.downgrade();
@@ -86,26 +127,46 @@ impl StreamManager {
         src.connect_pad_added(move |src_elem, src_pad| {
             info!("Received new pad '{}' from '{}'", src_pad.name(), src_elem.name());
 
-            let sink_pad = tee_clone.static_pad("sink").expect("Tee should have a sink pad");
-            if sink_pad.is_linked() {
-                info!("Tee sink pad is already linked. Ignoring.");
-                return;
+            // --- ここからcaps判定を追加 ---
+            let new_pad_caps = match src_pad.current_caps() {
+                Some(caps) => caps,
+                None => {
+                    warn!("No caps on new pad, ignoring");
+                    return;
+                }
+            };
+            let new_pad_struct = match new_pad_caps.structure(0) {
+                Some(s) => s,
+                None => {
+                    warn!("No structure in caps, ignoring");
+                    return;
+                }
+            };
+            info!("New pad created with caps: {}", new_pad_struct.to_string());
+            // H.264ビデオのみリンク
+            if new_pad_struct.name() == "application/x-rtp"
+                && new_pad_struct.get::<&str>("media").unwrap_or("") == "video"
+                && new_pad_struct.get::<&str>("encoding-name").unwrap_or("") == "H264"
+            {
+                let sink_pad = tee_clone.static_pad("sink").expect("Tee should have a sink pad");
+                if sink_pad.is_linked() {
+                    info!("Tee sink pad is already linked. Ignoring.");
+                    return;
+                }
+                let depay = ElementFactory::make("rtph264depay").build().unwrap();
+                let parse = ElementFactory::make("h264parse").build().unwrap();
+                if let Some(p) = pipeline_weak.upgrade() {
+                    p.add_many(&[&depay, &parse]).unwrap();
+                    Element::link_many(&[&depay, &parse, &tee_clone]).unwrap();
+                    src_pad.link(&depay.static_pad("sink").unwrap()).unwrap();
+                    depay.sync_state_with_parent().unwrap();
+                    parse.sync_state_with_parent().unwrap();
+                    info!("Successfully linked H.264 video stream.");
+                }
+            } else {
+                info!("Ignoring non-H264 video pad.");
             }
-
-            // このサンプルではH.264を想定
-            let depay = ElementFactory::make("rtph264depay").build().unwrap();
-            let parse = ElementFactory::make("h264parse").build().unwrap();
-            if let Some(p) = pipeline_weak.upgrade() {
-                 p.add_many(&[&depay, &parse]).unwrap();
-                 Element::link_many(&[&depay, &parse, &tee_clone]).unwrap();
-                 src_pad.link(&depay.static_pad("sink").unwrap()).unwrap();
-
-                 // 動的に追加した要素をSYNCING状態にする
-                 depay.sync_state_with_parent().unwrap();
-                 parse.sync_state_with_parent().unwrap();
-                 
-                 info!("Successfully linked rtspsrc to tee via depay and parse.");
-            }
+            // --- ここまでcaps判定 ---
         });
 
         // パイプラインをPLAYINGに設定してストリーム受信を開始
@@ -113,14 +174,11 @@ impl StreamManager {
             .map_err(|e| RecordError::StreamError(format!("Failed to set pipeline to PLAYING: {}", e)))?;
 
         info!("Base pipeline created and set to PLAYING.");
-        
-        // 状態を更新
         *self.pipeline.lock().await = Some(pipeline);
         *self.tee.lock().await = Some(tee);
         state.is_connected = true;
         state.protocol = Some(protocol);
         state.url = Some(url.clone());
-        
         Ok(())
     }
 
@@ -166,10 +224,14 @@ impl StreamManager {
             bin
         };
 
-        // パイプラインに録画Binを追加し、teeとリンク
+        // パイプラインに録画Binを追加
         pipeline.add(&rec_bin)?;
-        tee.link(&rec_bin)?;
-
+        // teeのrequest padを取得し、録画binのsinkにリンク
+        let tee_src_pad = tee.request_pad_simple("src_%u").ok_or_else(|| RecordError::StreamError("Failed to get tee request pad".into()))?;
+        let rec_bin_sink_pad = rec_bin.static_pad("sink").ok_or_else(|| RecordError::StreamError("Recording bin has no sink pad".into()))?;
+        tee_src_pad.link(&rec_bin_sink_pad).map_err(|_| RecordError::StreamError(format!("Failed to link elements 't' and '{}'", rec_bin_name)))?;
+        // padを記録
+        self.recording_pads.lock().await.insert(recording_id, tee_src_pad);
         // 録画Binを親パイプラインの状態に同期
         rec_bin.sync_state_with_parent()?;
         
@@ -183,46 +245,55 @@ impl StreamManager {
     /// 録画を停止します。
     pub async fn stop_recording(&self) -> Result<Uuid, RecordError> {
         let mut state = self.state.lock().await;
-
         if !state.is_recording {
             return Err(RecordError::StreamError("No recording is in progress".into()));
         }
-
         let recording_id = state.current_recording_id.take().ok_or_else(|| RecordError::StreamError("No current recording id found".into()))?;
         info!(%recording_id, "Stopping recording");
-
         let pipeline_lock = self.pipeline.lock().await;
         let pipeline = pipeline_lock.as_ref().ok_or_else(|| RecordError::StreamError("Pipeline not found.".into()))?;
-
         let rec_bin_name = format!("rec-bin-{}", recording_id);
         let rec_bin = pipeline.by_name(&rec_bin_name)
             .ok_or_else(|| RecordError::StreamError(format!("Could not find bin '{}'", rec_bin_name)))?;
-
         let tee_lock = self.tee.lock().await;
         let tee = tee_lock.as_ref().ok_or_else(|| RecordError::StreamError("Tee element not found.".into()))?;
-
+        let bus = pipeline.bus().unwrap();
+        let (eos_tx, mut eos_rx) = tokio::sync::mpsc::channel(1);
+        let rec_bin_name_clone = rec_bin_name.clone();
+        let _filesink_name = format!("rec-bin-{}", recording_id); // bin名
+        let _rec_bin_elem = rec_bin.clone();
+        // 別タスクでbusを監視
+        tokio::spawn(async move {
+            for msg in bus.iter_timed(gstreamer::ClockTime::NONE) {
+                use gstreamer::MessageView;
+                if let MessageView::Eos(_eos) = msg.view() {
+                    // 録画bin配下のEOSかどうか判定
+                    if let Some(src) = msg.src() {
+                        let path = src.path_string();
+                        if path.contains(&rec_bin_name_clone) || path.contains(&_filesink_name) {
+                            let _ = eos_tx.send(()).await;
+                            break;
+                        }
+                    }
+                }
+            }
+        });
         // teeから録画Binへのパッドを取得し、ブロックプローブを追加してEOSを送信
-        let sink_pad = rec_bin.static_pad("sink").unwrap();
-        let tee_src_pad = sink_pad.peer().ok_or_else(|| RecordError::StreamError("Could not get peer pad from recording bin".into()))?;
-
+        let _sink_pad = rec_bin.static_pad("sink").unwrap();
+        let tee_src_pad = self.recording_pads.lock().await.remove(&recording_id)
+            .ok_or_else(|| RecordError::StreamError("Could not get tee request pad for recording".into()))?;
         tee_src_pad.add_probe(PadProbeType::BLOCK_DOWNSTREAM, move |pad, _| {
             info!("Sending EOS to recording bin to finalize file.");
-            // EOSの送信はpadではなく、要素のsink padに対して行う
             let peer_pad = pad.peer().unwrap();
             peer_pad.send_event(event::Eos::new());
             PadProbeReturn::Remove
         });
-
-        // ファイル終端処理のために少し待機
-        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-
-        // teeからBinを切り離し、パイプラインから削除
+        // busからEOSを受信するまで待つ
+        eos_rx.recv().await;
         tee.release_request_pad(&tee_src_pad);
         pipeline.remove(&rec_bin)?;
         rec_bin.set_state(State::Null)?;
-        
         info!(%recording_id, "Recording bin removed and file saved.");
-
         state.is_recording = false;
         Ok(recording_id)
     }

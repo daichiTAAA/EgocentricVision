@@ -107,6 +107,7 @@ impl Database {
         Ok(recording)
     }
 
+    #[allow(dead_code)]
     pub async fn update_recording_failed(&self, id: Uuid) -> Result<Recording, RecordError> {
         let status = RecordingStatus::Failed;
         let row = sqlx::query(
