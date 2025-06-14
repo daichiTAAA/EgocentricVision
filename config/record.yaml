@@ -1,0 +1,19 @@
+# Record service configuration
+
+# Directory where recordings will be saved
+recording_directory: /var/data/recordings
+
+# Database configuration
+database:
+  # PostgreSQL connection URL
+  url: "postgres://user:password@localhost:5432/egocentric_vision"
+
+# Stream configuration
+stream:
+  # Default RTSP URL (optional)
+  default_rtsp_url: "rtsp://127.0.0.1:8554/stream"
+
+# Server configuration
+server:
+  host: "0.0.0.0"
+  port: 3000
