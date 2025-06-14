@@ -30,6 +30,15 @@ RUN mkdir src && \
 # Configure cargo to use git for dependencies that might have issues
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 ENV CARGO_HTTP_CAINFO=/etc/ssl/certs/ca-certificates.crt
+ENV CARGO_HTTP_CHECK_REVOKE=false
+
+# Create cargo config to disable SSL check for build environment
+RUN mkdir -p ~/.cargo && \
+    echo '[http]' > ~/.cargo/config.toml && \
+    echo 'check-revoke = false' >> ~/.cargo/config.toml
+
+# Temporarily disable SSL verification for build (not recommended for production)
+RUN git config --global http.sslVerify false
 
 # Build dependencies only
 RUN cargo build --release && \
