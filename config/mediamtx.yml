@@ -724,10 +724,10 @@ paths:
   # example:
   # my_camera:
   #   source: rtsp://my_camera
-  my_camera:
+  cam1:
     source: rpiCamera
 
   # Settings under path "all_others" are applied to all paths that
   # do not match another entry.
-  all_others:
-    sourceOnDemand: yes
+  # all_others:
+  #   sourceOnDemand: yes
