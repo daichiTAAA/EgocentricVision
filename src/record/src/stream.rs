@@ -5,10 +5,11 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 use gstreamer::prelude::*;
-use gstreamer::{Bin, Element, ElementFactory, GhostPad, Pipeline, State};
-use gstreamer::{StateChangeError};
-use gstreamer::parse;
-use tracing::{info, warn};
+use gstreamer::{
+    event, Bin, Element, ElementFactory, GhostPad, PadProbeReturn,
+    PadProbeType, Pipeline, State, StateChangeError,
+};
+use tracing::{info, warn, error, debug};
 use crate::models::StreamStatus;
 use glib::BoolError;
 
@@ -23,10 +24,12 @@ pub struct StreamState {
 }
 
 /// GStreamerパイプラインとストリーム状態を管理します。
-#[derive(Debug)]
+// `tee` 要素を保持するために StreamManager を修正
 pub struct StreamManager {
     state: Arc<Mutex<StreamState>>,
     pipeline: Arc<Mutex<Option<Pipeline>>>,
+    // tee要素を保持するためのフィールドを追加
+    tee: Arc<Mutex<Option<Element>>>,
     config: Config,
 }
 
@@ -39,6 +42,7 @@ impl StreamManager {
         Self {
             state: Arc::new(Mutex::new(StreamState::default())),
             pipeline: Arc::new(Mutex::new(None)),
+            tee: Arc::new(Mutex::new(None)), // teeを初期化
             config,
         }
     }
@@ -60,170 +64,165 @@ impl StreamManager {
     /// RTSPストリームに接続し、再生準備ができたパイプラインを構築します。
     pub async fn connect(&self, protocol: String, url: String) -> Result<(), RecordError> {
         let mut state = self.state.lock().await;
-        let mut pipeline_lock = self.pipeline.lock().await;
-
         if state.is_connected {
-            return Err(RecordError::StreamError(
-                "Already connected to a stream".to_string(),
-            ));
+            return Err(RecordError::StreamError("Already connected to a stream".to_string()));
         }
 
-        info!(%url, "Connecting to stream");
+        info!(%url, "Connecting to stream and creating base pipeline");
 
-        // パイプラインを手動で構築し、rtspsrcのpad-addedシグナルをハンドル
+        // パイプラインを構築: rtspsrc -> ... -> tee
         let pipeline = Pipeline::new();
-        let src = ElementFactory::make("rtspsrc").property("location", &url).property("latency", &0u32).build()?;
-        let depay = ElementFactory::make("rtph264depay").build()?;
-        let parse = ElementFactory::make("h264parse").build()?;
-        let mux = ElementFactory::make("mp4mux").build()?;
-        let sink = ElementFactory::make("filesink").property("location", "/tmp/test.mp4").build()?;
+        let src = ElementFactory::make("rtspsrc")
+            .property("location", &url)
+            .property("latency", &0u32)
+            .build()?;
+        let tee = ElementFactory::make("tee").name("t").build()?;
 
-        pipeline.add_many(&[&src, &depay, &parse, &mux, &sink])?;
-        Element::link_many(&[&depay, &parse, &mux, &sink])?;
+        pipeline.add_many(&[&src, &tee])?;
 
-        // rtspsrcのpad-addedシグナルでdepayチェーンに接続
-        let depay_clone = depay.downgrade();
-        src.connect_pad_added(move |src, src_pad| {
-            if let Some(depay) = depay_clone.upgrade() {
-                let sink_pad = depay.static_pad("sink").unwrap();
-                if sink_pad.is_linked() {
-                    return;
-                }
-                let _ = src_pad.link(&sink_pad);
+        // pipeline_weakを事前に作成し、クロージャにはそれだけmoveする
+        let pipeline_weak = pipeline.downgrade();
+        let tee_clone = tee.clone();
+        src.connect_pad_added(move |src_elem, src_pad| {
+            info!("Received new pad '{}' from '{}'", src_pad.name(), src_elem.name());
+
+            let sink_pad = tee_clone.static_pad("sink").expect("Tee should have a sink pad");
+            if sink_pad.is_linked() {
+                info!("Tee sink pad is already linked. Ignoring.");
+                return;
+            }
+
+            // このサンプルではH.264を想定
+            let depay = ElementFactory::make("rtph264depay").build().unwrap();
+            let parse = ElementFactory::make("h264parse").build().unwrap();
+            if let Some(p) = pipeline_weak.upgrade() {
+                 p.add_many(&[&depay, &parse]).unwrap();
+                 Element::link_many(&[&depay, &parse, &tee_clone]).unwrap();
+                 src_pad.link(&depay.static_pad("sink").unwrap()).unwrap();
+
+                 // 動的に追加した要素をSYNCING状態にする
+                 depay.sync_state_with_parent().unwrap();
+                 parse.sync_state_with_parent().unwrap();
+                 
+                 info!("Successfully linked rtspsrc to tee via depay and parse.");
             }
         });
 
-        pipeline.set_state(State::Paused)
-            .map_err(|e| RecordError::StreamError(e.to_string()))?;
+        // パイプラインをPLAYINGに設定してストリーム受信を開始
+        pipeline.set_state(State::Playing)
+            .map_err(|e| RecordError::StreamError(format!("Failed to set pipeline to PLAYING: {}", e)))?;
 
-        info!("Successfully created and paused pipeline.");
-
-        *pipeline_lock = Some(pipeline);
+        info!("Base pipeline created and set to PLAYING.");
+        
+        // 状態を更新
+        *self.pipeline.lock().await = Some(pipeline);
+        *self.tee.lock().await = Some(tee);
         state.is_connected = true;
         state.protocol = Some(protocol);
-        state.url = Some(url);
-
+        state.url = Some(url.clone());
+        
         Ok(())
     }
 
     /// 録画を開始します。
     pub async fn start_recording(&self, recording_id: Uuid) -> Result<(), RecordError> {
         let mut state = self.state.lock().await;
-        let pipeline_lock = self.pipeline.lock().await;
-
+        
         if !state.is_connected {
-            return Err(RecordError::StreamError(
-                "Not connected to any stream".to_string(),
-            ));
+            return Err(RecordError::NotConnected);
         }
         if state.is_recording {
-            return Err(RecordError::StreamError(
-                "Recording is already in progress".to_string(),
-            ));
+            return Err(RecordError::AlreadyRecording);
         }
 
-        let pipeline = pipeline_lock.as_ref().ok_or_else(|| {
-            RecordError::StreamError("Pipeline not found, connect to a stream first.".to_string())
-        })?;
+        let pipeline_lock = self.pipeline.lock().await;
+        let pipeline = pipeline_lock.as_ref().ok_or_else(|| RecordError::StreamError("Pipeline not found".into()))?;
 
-        // 設定ファイルから保存先パスを取得し、ファイル名を生成します。
+        let tee_lock = self.tee.lock().await;
+        let tee = tee_lock.as_ref().ok_or_else(|| RecordError::StreamError("Tee element not found".into()))?;
+
+        // ファイルパスを生成
         let mut path = PathBuf::from(&self.config.recording_directory);
-        tokio::fs::create_dir_all(&path).await?; // 保存ディレクトリをなければ作成
+        tokio::fs::create_dir_all(&path).await?;
         path.push(format!("{}.mp4", recording_id));
-        let location = path.to_str().ok_or_else(|| {
-            RecordError::StreamError("Invalid file path for recording".to_string())
-        })?;
+        let location = path.to_str().ok_or_else(|| RecordError::StreamError("Invalid file path".into()))?;
 
-        info!(location, "Starting recording");
+        info!(%location, "Starting recording");
 
-        // 録画用のパイプライン部品（Bin）を動的に作成します。
+        // 録画用Binを作成: queue -> mp4mux -> filesink
+        let rec_bin_name = format!("rec-bin-{}", recording_id);
         let rec_bin = {
-            let bin = Bin::new();
+            let bin = Bin::with_name(&rec_bin_name);
             let queue = ElementFactory::make("queue").build()?;
             let mux = ElementFactory::make("mp4mux").build()?;
-            let sink = ElementFactory::make("filesink").build()?;
-            sink.set_property("location", location);
+            let sink = ElementFactory::make("filesink").property("location", location).build()?;
 
             bin.add_many(&[&queue, &mux, &sink])?;
             Element::link_many(&[&queue, &mux, &sink])?;
 
-            // Binの入力パッドを作成
-            let pad = queue.static_pad("sink").ok_or_else(|| RecordError::StreamError("No static pad 'sink' on queue".to_string()))?;
+            let pad = queue.static_pad("sink").ok_or_else(|| RecordError::StreamError("Queue has no sink pad".into()))?;
             let ghost_pad = GhostPad::with_target(&pad)?;
             bin.add_pad(&ghost_pad)?;
             bin
         };
 
+        // パイプラインに録画Binを追加し、teeとリンク
         pipeline.add(&rec_bin)?;
+        tee.link(&rec_bin)?;
 
-        // teeやrec_binの追加・リンク処理は不要
-        // パイプラインがまだ再生中でなければ、PLAYING状態に移行します。
-        if pipeline.current_state() != State::Playing {
-            pipeline.set_state(State::Playing)?;
-            info!("Pipeline state changed to PLAYING");
-        }
+        // 録画Binを親パイプラインの状態に同期
+        rec_bin.sync_state_with_parent()?;
+        
         state.is_recording = true;
         state.current_recording_id = Some(recording_id);
+        info!("Successfully started recording with ID: {}", recording_id);
+
         Ok(())
     }
 
     /// 録画を停止します。
     pub async fn stop_recording(&self) -> Result<Uuid, RecordError> {
         let mut state = self.state.lock().await;
-        let pipeline_lock = self.pipeline.lock().await;
 
         if !state.is_recording {
-            return Err(RecordError::StreamError(
-                "No recording is currently in progress".to_string(),
-            ));
+            return Err(RecordError::StreamError("No recording is in progress".into()));
         }
 
-        let recording_id = state.current_recording_id.take().ok_or_else(|| RecordError::StreamError("No current recording id".to_string()))?;
+        let recording_id = state.current_recording_id.take().ok_or_else(|| RecordError::StreamError("No current recording id found".into()))?;
         info!(%recording_id, "Stopping recording");
 
-        let pipeline = pipeline_lock
-            .as_ref()
-            .ok_or_else(|| RecordError::StreamError("Pipeline not found.".to_string()))?;
+        let pipeline_lock = self.pipeline.lock().await;
+        let pipeline = pipeline_lock.as_ref().ok_or_else(|| RecordError::StreamError("Pipeline not found.".into()))?;
 
-        // 録画用Binとtee要素を取得
-        let bin_name = format!("rec-bin-{}", recording_id);
-        let rec_bin = pipeline
-            .by_name(&bin_name)
-            .ok_or_else(|| RecordError::StreamError(format!("Could not find bin '{}'", bin_name)))?;
-        let tee = pipeline
-            .by_name("t")
-            .ok_or_else(|| RecordError::StreamError("Could not find 'tee' element".to_string()))?;
+        let rec_bin_name = format!("rec-bin-{}", recording_id);
+        let rec_bin = pipeline.by_name(&rec_bin_name)
+            .ok_or_else(|| RecordError::StreamError(format!("Could not find bin '{}'", rec_bin_name)))?;
 
-        // teeから録画Binへのデータフローをブロックし、EOS(End-of-Stream)イベントを送信します。
-        let tee_src_pad = rec_bin.static_pad("sink").and_then(|p| p.peer()).ok_or_else(|| RecordError::StreamError("Could not get peer pad".to_string()))?;
-        tee_src_pad.add_probe(gstreamer::PadProbeType::BLOCK_DOWNSTREAM, move |pad, _| {
+        let tee_lock = self.tee.lock().await;
+        let tee = tee_lock.as_ref().ok_or_else(|| RecordError::StreamError("Tee element not found.".into()))?;
+
+        // teeから録画Binへのパッドを取得し、ブロックプローブを追加してEOSを送信
+        let sink_pad = rec_bin.static_pad("sink").unwrap();
+        let tee_src_pad = sink_pad.peer().ok_or_else(|| RecordError::StreamError("Could not get peer pad from recording bin".into()))?;
+
+        tee_src_pad.add_probe(PadProbeType::BLOCK_DOWNSTREAM, move |pad, _| {
             info!("Sending EOS to recording bin to finalize file.");
-            pad.send_event(gstreamer::event::Eos::new());
-            gstreamer::PadProbeReturn::Remove
+            // EOSの送信はpadではなく、要素のsink padに対して行う
+            let peer_pad = pad.peer().unwrap();
+            peer_pad.send_event(event::Eos::new());
+            PadProbeReturn::Remove
         });
 
-        // ファイル終端処理のために少し待機します。
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        // ファイル終端処理のために少し待機
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
-        // teeからBinを切り離し、パイプラインから削除します。
-        tee.unlink(&rec_bin);
+        // teeからBinを切り離し、パイプラインから削除
+        tee.release_request_pad(&tee_src_pad);
         pipeline.remove(&rec_bin)?;
         rec_bin.set_state(State::Null)?;
         
         info!(%recording_id, "Recording bin removed and file saved.");
 
-        // パイプラインにEOSイベントを送信
-        pipeline.send_event(gstreamer::event::Eos::new());
-        // BusでEOSメッセージを待つ
-        if let Some(bus) = pipeline.bus() {
-            for msg in bus.iter_timed(gstreamer::ClockTime::NONE) {
-                if let gstreamer::MessageView::Eos(..) = msg.view() {
-                    break;
-                }
-            }
-        }
-        pipeline.set_state(State::Null)?;
-        info!(%recording_id, "Pipeline set to Null and file finalized.");
         state.is_recording = false;
         Ok(recording_id)
     }
@@ -231,29 +230,32 @@ impl StreamManager {
     /// ストリームから切断し、パイプラインを停止・破棄します。
     pub async fn disconnect(&self) -> Result<(), RecordError> {
         let mut state = self.state.lock().await;
-        let mut pipeline_lock = self.pipeline.lock().await;
-
         if !state.is_connected {
             warn!("Not connected, nothing to do.");
             return Ok(());
         }
 
-        if let Some(pipeline) = pipeline_lock.take() {
-            // 録画中であれば、まず録画を停止する
-            if state.is_recording {
-                warn!("Recording was in progress during disconnect. Stopping it first.");
-                drop(state);
-                drop(pipeline_lock);
-                self.stop_recording().await?;
-                state = self.state.lock().await;
+        // 録画中であれば停止する
+        if state.is_recording {
+            warn!("Recording was in progress during disconnect. Stopping it first.");
+            // Mutexのロックを一度解放してstop_recordingを呼べるようにする
+            drop(state);
+            if let Err(e) = self.stop_recording().await {
+                 error!("Failed to stop recording during disconnect: {}", e);
             }
-
-            info!("Disconnecting from stream and stopping pipeline...");
+            state = self.state.lock().await;
+        }
+        
+        info!("Disconnecting from stream and stopping pipeline...");
+        
+        let mut pipeline_lock = self.pipeline.lock().await;
+        if let Some(pipeline) = pipeline_lock.take() {
             pipeline.set_state(State::Null)?;
-            info!("Pipeline stopped successfully.");
+            info!("Pipeline stopped and destroyed successfully.");
         }
 
         *state = StreamState::default();
+        *self.tee.lock().await = None; // teeもクリア
 
         Ok(())
     }

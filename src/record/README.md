@@ -69,9 +69,7 @@ curl -X POST http://localhost:3000/api/v1/streams/connect \
 
 ### Start Recording
 ```bash
-curl -X POST http://localhost:3000/api/v1/recordings/start \
-  -H "Content-Type: application/json" \
-  -d '{"rtsp_url": "rtsp://192.168.0.18:8554/cam"}'
+curl -X POST http://localhost:3000/api/v1/recordings/start
 ```
 
 ### Stop Recording
@@ -93,9 +91,7 @@ curl -X POST http://localhost:3000/api/v1/streams/connect \
 ```
 2. **録画開始**
 ```bash
-curl -X POST http://localhost:3000/api/v1/recordings/start \
-  -H "Content-Type: application/json" \
-  -d '{"rtsp_url": "rtsp://192.168.0.18:8554/cam"}'
+curl -X POST http://localhost:3000/api/v1/recordings/start
 ```
 
 > 事前にストリーム接続せずに録画開始APIを呼ぶと、
