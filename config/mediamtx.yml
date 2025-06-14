@@ -59,8 +59,7 @@ authInternalUsers:
   # IPs or networks allowed to use this user. An empty list means any IP.
   ips: []
   # List of permissions.
-  permissions:
-    # Available actions are: publish, read, playback, api, metrics, pprof.
+  # Available actions are: publish, read, playback, api, metrics, pprof.
     - action: publish
       # Paths can be set to further restrict access to a specific path.
       # An empty path means any path.
@@ -728,3 +727,4 @@ paths:
   # Settings under path "all_others" are applied to all paths that
   # do not match another entry.
   all_others:
+    sourceOnDemand: yes
