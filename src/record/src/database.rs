@@ -1,4 +1,4 @@
-use sqlx::{PgPool, migrate::MigrateDatabase, Postgres, Row};
+use sqlx::{PgPool, migrate::MigrateDatabase, Postgres};
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
 use crate::error::RecordError;

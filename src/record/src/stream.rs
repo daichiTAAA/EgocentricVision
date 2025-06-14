@@ -197,7 +197,6 @@ impl StreamManager {
         .expect("Failed to add bus watch");
 
         // Create pipeline_weak in advance and move only it to the closure
-        let depay_clone = depay.clone();
         let identity_src_clone = identity_src.clone();
         let is_tee_ready_clone = self.is_tee_ready.clone();
         src.connect_pad_added(move |src_elem, src_pad| {
@@ -378,32 +377,51 @@ impl StreamManager {
                     return Err(RecordError::StreamError("ghost pad creation failed".to_string()));
                 }
             };
-            tracing::info!("[recording {}] [after ghost create] ghost_pad: is_active={}, is_linked={}, target={:?}, direction={:?}",
-                recording_id,
-                ghost_pad.is_active(),
-                ghost_pad.is_linked(),
-                ghost_pad.target().map(|p| p.name()),
-                ghost_pad.direction()
-            );
-            // active化
-            let _ = ghost_pad.set_active(true);
-            tracing::info!("[recording {}] [after ghost set_active] ghost_pad: is_active={}, is_linked={}, target={:?}, direction={:?}",
-                recording_id,
-                ghost_pad.is_active(),
-                ghost_pad.is_linked(),
-                ghost_pad.target().map(|p| p.name()),
-                ghost_pad.direction()
-            );
-            let add_pad_res = bin.add_pad(&ghost_pad);
-            tracing::info!("[recording {}] [after bin.add_pad] ghost_pad: is_active={}, is_linked={}, target={:?}, direction={:?}, add_pad_res={:?}",
+            tracing::info!("[recording {}] [after ghost create] ghost_pad: is_active={}, is_linked={}, target={:?}, direction={:?}, caps={:?}, peer={:?}",
                 recording_id,
                 ghost_pad.is_active(),
                 ghost_pad.is_linked(),
                 ghost_pad.target().map(|p| p.name()),
                 ghost_pad.direction(),
-                add_pad_res
+                ghost_pad.current_caps(),
+                ghost_pad.peer().map(|p| p.name())
             );
-
+            tracing::info!("[recording {}] [after ghost create] queue.sink: is_active={}, is_linked={}, caps={:?}, peer={:?}",
+                recording_id,
+                queue_sink_pad.is_active(),
+                queue_sink_pad.is_linked(),
+                queue_sink_pad.current_caps(),
+                queue_sink_pad.peer().map(|p| p.name())
+            );
+            // active化
+            let _ = ghost_pad.set_active(true);
+            tracing::info!("[recording {}] [after ghost set_active] ghost_pad: is_active={}, is_linked={}, target={:?}, direction={:?}, caps={:?}, peer={:?}",
+                recording_id,
+                ghost_pad.is_active(),
+                ghost_pad.is_linked(),
+                ghost_pad.target().map(|p| p.name()),
+                ghost_pad.direction(),
+                ghost_pad.current_caps(),
+                ghost_pad.peer().map(|p| p.name())
+            );
+            let add_pad_res = bin.add_pad(&ghost_pad);
+            tracing::info!("[recording {}] [after bin.add_pad] ghost_pad: is_active={}, is_linked={}, target={:?}, direction={:?}, add_pad_res={:?}, caps={:?}, peer={:?}",
+                recording_id,
+                ghost_pad.is_active(),
+                ghost_pad.is_linked(),
+                ghost_pad.target().map(|p| p.name()),
+                ghost_pad.direction(),
+                add_pad_res,
+                ghost_pad.current_caps(),
+                ghost_pad.peer().map(|p| p.name())
+            );
+            tracing::info!("[recording {}] [after bin.add_pad] queue.sink: is_active={}, is_linked={}, caps={:?}, peer={:?}",
+                recording_id,
+                queue_sink_pad.is_active(),
+                queue_sink_pad.is_linked(),
+                queue_sink_pad.current_caps(),
+                queue_sink_pad.peer().map(|p| p.name())
+            );
             let rec_bin = bin.name().to_string();
             tracing::info!("[recording {}] rec_bin created: {}", recording_id, rec_bin);
 
@@ -448,6 +466,26 @@ impl StreamManager {
         // Add recording Bin to the pipeline
         pipeline.add(&rec_bin)?;
         tracing::info!("[recording {}] rec_bin added to pipeline", recording_id);
+        // pipeline.add直後のghost pad/queue.sink pad/rec_bin.sink padの状態
+        if let Some(gp) = rec_bin.static_pad("sink") {
+            tracing::info!("[recording {}] [after pipeline.add] rec_bin.sink ghost_pad: is_active={}, is_linked={}, direction={:?}, caps={:?}, peer={:?}",
+                recording_id,
+                gp.is_active(),
+                gp.is_linked(),
+                gp.direction(),
+                gp.current_caps(),
+                gp.peer().map(|p| p.name())
+            );
+        }
+        if let Some(qsp) = rec_bin.by_name("queue").and_then(|e| e.static_pad("sink")) {
+            tracing::info!("[recording {}] [after pipeline.add] queue.sink: is_active={}, is_linked={}, caps={:?}, peer={:?}",
+                recording_id,
+                qsp.is_active(),
+                qsp.is_linked(),
+                qsp.current_caps(),
+                qsp.peer().map(|p| p.name())
+            );
+        }
         // Link the request pad of tee to the sink of the recording bin
         let tee_src_pad = match tee.request_pad_simple("src_%u") {
             Some(pad) => pad,
@@ -484,7 +522,24 @@ impl StreamManager {
         tracing::info!("[recording {}] rec_bin_sink_pad: name={}, is_linked={}", recording_id, rec_bin_sink_pad.name(), rec_bin_sink_pad.is_linked());
         let link_res = tee_src_pad.link(&rec_bin_sink_pad);
         tracing::info!("[recording {}] tee_src_pad.link(rec_bin_sink_pad) result: {:?}", recording_id, link_res);
-        tracing::info!("[recording {}] after link: tee_src_pad.is_linked={}, rec_bin_sink_pad.is_linked={}", recording_id, tee_src_pad.is_linked(), rec_bin_sink_pad.is_linked());
+        // link直後のghost pad/queue.sink pad/rec_bin.sink padの状態
+        tracing::info!("[recording {}] [after tee_src_pad.link] rec_bin.sink ghost_pad: is_active={}, is_linked={}, direction={:?}, caps={:?}, peer={:?}",
+            recording_id,
+            rec_bin_sink_pad.is_active(),
+            rec_bin_sink_pad.is_linked(),
+            rec_bin_sink_pad.direction(),
+            rec_bin_sink_pad.current_caps(),
+            rec_bin_sink_pad.peer().map(|p| p.name())
+        );
+        if let Some(qsp) = rec_bin.by_name("queue").and_then(|e| e.static_pad("sink")) {
+            tracing::info!("[recording {}] [after tee_src_pad.link] queue.sink: is_active={}, is_linked={}, caps={:?}, peer={:?}",
+                recording_id,
+                qsp.is_active(),
+                qsp.is_linked(),
+                qsp.current_caps(),
+                qsp.peer().map(|p| p.name())
+            );
+        }
         // 追加: rec_bin_sink_padの詳細状態
         tracing::info!(
             "[recording {}] rec_bin_sink_pad after link: name={}, is_linked={}, is_active={}, peer={:?}, caps={:?}, direction={:?}",
@@ -519,17 +574,24 @@ impl StreamManager {
         // Sync the state of the recording Bin with the parent pipeline
         let sync_res = rec_bin.sync_state_with_parent();
         tracing::info!("[recording {}] rec_bin.sync_state_with_parent() result: {:?}", recording_id, sync_res);
-        // 追加: sync_state_with_parent直後のrec_bin_sink_pad状態
-        tracing::info!(
-            "[recording {}] rec_bin_sink_pad after sync: name={}, is_linked={}, is_active={}, peer={:?}, caps={:?}, direction={:?}",
+        // sync_state_with_parent直後のghost pad/queue.sink pad/rec_bin.sink padの状態
+        tracing::info!("[recording {}] [after sync_state_with_parent] rec_bin.sink ghost_pad: is_active={}, is_linked={}, direction={:?}, caps={:?}, peer={:?}",
             recording_id,
-            rec_bin_sink_pad.name(),
-            rec_bin_sink_pad.is_linked(),
             rec_bin_sink_pad.is_active(),
-            rec_bin_sink_pad.peer().map(|p| p.name().to_string()),
-            rec_bin_sink_pad.current_caps().map(|c| c.to_string()),
-            rec_bin_sink_pad.direction()
+            rec_bin_sink_pad.is_linked(),
+            rec_bin_sink_pad.direction(),
+            rec_bin_sink_pad.current_caps(),
+            rec_bin_sink_pad.peer().map(|p| p.name())
         );
+        if let Some(qsp) = rec_bin.by_name("queue").and_then(|e| e.static_pad("sink")) {
+            tracing::info!("[recording {}] [after sync_state_with_parent] queue.sink: is_active={}, is_linked={}, caps={:?}, peer={:?}",
+                recording_id,
+                qsp.is_active(),
+                qsp.is_linked(),
+                qsp.current_caps(),
+                qsp.peer().map(|p| p.name())
+            );
+        }
         // dotファイル出力（状態遷移後に実施）
         let dot_path = format!("/tmp/rec_bin_{}.dot", recording_id);
         rec_bin.debug_to_dot_file(gstreamer::DebugGraphDetails::all(), &dot_path);
@@ -585,7 +647,7 @@ impl StreamManager {
             }
         };
 
-        let tee_src_pad = match self.recording_pads.lock().await.remove(&recording_id) {
+        let _tee_src_pad = match self.recording_pads.lock().await.remove(&recording_id) {
             Some(pad) => pad,
             None => {
                 tracing::warn!("tee_src_pad not found for recording_id={}", recording_id);
