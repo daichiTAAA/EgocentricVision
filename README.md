@@ -1,7 +1,11 @@
 # EgocentricVision
 
-# IPアドレスを固定する
-## Raspberry Pi OSでIPアドレスを固定する方法
+# Raspberry Pi Zero 2 WでのEgocentric Visionシステムのセットアップ手順
+## Raspberry Pi OSのインストール
+Raspberry Pi Zero 2 WにRaspberry Pi OS(32ビット版)をインストールします。
+
+## IPアドレスを固定
+Raspberry Pi Zero 2 WのIPアドレスを固定することで、ネットワーク上でのアクセスを安定させます。以下は、Raspberry Pi OSでのIPアドレス固定の手順です。
 
 Raspberry Pi OSでは、`/etc/dhcpcd.conf`ファイルを編集してIPアドレスを固定します。
 
@@ -42,7 +46,7 @@ ip route | grep default
 
 `default via`の後ろに表示されるアドレスがルーター（ゲートウェイ）です。
 
-# Mediamtxをインストールする
+## Mediamtxをインストールする
 
 Raspberry Pi Zero 2 W の Raspberry Pi OS で Mediamtx を最新版にインストールし、systemd で自動起動する手順を記載します。
 
@@ -109,7 +113,7 @@ Mediamtxのデフォルト設定では、Raspberry Pi Cameraのストリーム�
 - RTSP URL例:
   
   ```
-  rtsp://<RaspberryPiのIPアドレス>:8554/
+  rtsp://<RaspberryPiのIPアドレス>:8554/cam/
   ```
   
   - VLCやffmpegなどのRTSPクライアントで再生可能です。
@@ -121,7 +125,7 @@ MediamtxはWebRTCの簡易プレイヤーを内蔵しています。
 - WebRTC視聴用URL:
   
   ```
-  http://<RaspberryPiのIPアドレス>:8889/
+  http://<RaspberryPiのIPアドレス>:8889/cam/
   ```
   
   - ブラウザで上記URLにアクセスし、ストリーム名（例: `/`）を入力して再生できます。
