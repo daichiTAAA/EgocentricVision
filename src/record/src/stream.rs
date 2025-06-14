@@ -293,7 +293,7 @@ impl StreamManager {
         let rec_bin = {
             let queue = ElementFactory::make("queue").build()?;
             let identity_pre_parse = ElementFactory::make("identity").property("signal-handoffs", &true).build()?;
-            let parse = ElementFactory::make("h264parse").build()?;
+            // h264parseは削除
             let mux = ElementFactory::make("mp4mux").property("streamable", &true).build()?;
             let identity = ElementFactory::make("identity").property("signal-handoffs", &true).build()?;
             let sink = ElementFactory::make("filesink").property("location", location).property("async", &false).build()?;
@@ -305,16 +305,7 @@ impl StreamManager {
                 None
             });
 
-            // --- 追加: 各要素にPadProbeType::BUFFERでprobeを追加しバッファ到達をtracing出力 ---
-            let rec_id_probe_parse = recording_id.clone();
-            if let Some(parse_sink_pad) = parse.static_pad("sink") {
-                parse_sink_pad.add_probe(PadProbeType::BUFFER, move |_, _| {
-                    tracing::info!("[recording {}] [rec_bin] h264parse.sink BUFFER probe: buffer arrived", rec_id_probe_parse);
-                    PadProbeReturn::Ok
-                });
-            } else {
-                tracing::warn!("[record bin] h264parse sink pad not found at probe setup");
-            }
+            // --- PadProbe: h264parse関連は削除 ---
             // mp4muxのvideo_0 padは1回だけ取得し、以降使い回す
             let mux_video_0_pad = mux.request_pad_simple("video_0");
             let rec_id_probe_mux = recording_id.clone();
@@ -335,10 +326,9 @@ impl StreamManager {
             } else {
                 tracing::warn!("[record bin] identity sink pad not found at probe setup");
             }
-            let rec_id_probe_filesink = recording_id.clone();
             // filesinkのsink padにPadProbeを追加（padが取得できた場合のみ）
             if let Some(filesink_sink_pad) = sink.static_pad("sink") {
-                let _ = filesink_sink_pad.add_probe(PadProbeType::BUFFER, |pad, info| {
+                let _ = filesink_sink_pad.add_probe(PadProbeType::BUFFER, |pad, _info| {
                     tracing::info!("[record bin] filesink sink pad: buffer arrived");
                     PadProbeReturn::Ok
                 });
@@ -348,12 +338,11 @@ impl StreamManager {
             // --- 追加ここまで ---
 
             let bin = Bin::with_name(&format!("rec-bin-{}", recording_id));
-            let add_result = bin.add_many(&[&queue, &identity_pre_parse, &parse, &mux, &identity, &sink]);
+            // add_manyからparseを除外
+            let add_result = bin.add_many(&[&queue, &identity_pre_parse, &mux, &identity, &sink]);
             tracing::info!("[recording {}] bin.add_many result: {:?}", recording_id, add_result);
 
             // ghost pad生成・add・set_active・add_pad・link_manyの順序を厳密化
-            // mp4muxのvideo_0 padはrequest_pad_simpleで1回だけ取得し使い回す
-            // caps negotiation失敗時はtracingで警告
             let queue_sink_pad = match queue.static_pad("sink") {
                 Some(pad) => pad,
                 None => {
@@ -425,14 +414,13 @@ impl StreamManager {
             let rec_bin = bin.name().to_string();
             tracing::info!("[recording {}] rec_bin created: {}", recording_id, rec_bin);
 
-            // 直列リンク
-            let link_result = Element::link_many(&[&queue, &identity_pre_parse, &parse, &mux, &identity, &sink]);
+            // 直列リンク（parseを除外）
+            let link_result = Element::link_many(&[&queue, &identity_pre_parse, &mux, &identity, &sink]);
             tracing::info!("[recording {}] Element::link_many result: {:?}", recording_id, link_result);
-            // link_many直後のqueue.sink, identity_pre_parse.sink, parse.sink, mux.video_0, identity.sink, filesink.sinkのpad状態を出力
+            // link_many直後のqueue.sink, identity_pre_parse.sink, mux.video_0, identity.sink, filesink.sinkのpad状態を出力
             let pads = [
                 ("queue.sink", queue.static_pad("sink")),
                 ("identity_pre_parse.sink", identity_pre_parse.static_pad("sink")),
-                ("parse.sink", parse.static_pad("sink")),
                 ("mux.video_0", mux_video_0_pad.clone()),
                 ("identity.sink", identity.static_pad("sink")),
                 ("filesink.sink", sink.static_pad("sink")),
