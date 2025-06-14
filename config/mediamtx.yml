@@ -534,9 +534,9 @@ pathDefaults:
   # Whether this is a secondary stream.
   rpiCameraSecondary: false
   # Width of frames.
-  rpiCameraWidth: 640
+  rpiCameraWidth: 1280
   # Height of frames.
-  rpiCameraHeight: 360
+  rpiCameraHeight: 720
   # Flip horizontally.
   rpiCameraHFlip: false
   # Flip vertically.
@@ -580,7 +580,7 @@ pathDefaults:
   # bit-depth and packing are optional.
   rpiCameraMode:
   # frames per second.
-  rpiCameraFPS: 2
+  rpiCameraFPS: 15
   # Autofocus mode.
   # values: auto, manual, continuous.
   rpiCameraAfMode: continuous
@@ -611,7 +611,7 @@ pathDefaults:
   # Period between H264 IDR frames.
   rpiCameraIDRPeriod: 60
   # H264 Bitrate.
-  rpiCameraBitrate: 1000000
+  rpiCameraBitrate: 5000000
   # H264 profile.
   rpiCameraProfile: main
   # H264 level.
