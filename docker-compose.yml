@@ -1,0 +1,39 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: egocentric_vision
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d egocentric_vision"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  record-service:
+    build:
+      context: ./src/record
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      # Override database URL to point to the postgres container
+      RECORD_DATABASE__URL: "postgres://user:password@postgres:5432/egocentric_vision"
+      # Override recording directory for container
+      RECORD_RECORDING_DIRECTORY: "/var/data/recordings"
+    volumes:
+      - ./config:/app/config:ro
+      - recordings_data:/var/data/recordings
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  recordings_data:
