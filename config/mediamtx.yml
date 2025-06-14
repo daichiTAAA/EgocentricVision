@@ -724,8 +724,18 @@ paths:
   # example:
   # my_camera:
   #   source: rtsp://my_camera
-  cam1:
-    source: rpiCamera
+  cam:  # パス名は何でもOKです（例: my-camera, v3-streamなど）
+    runOnDemand: yes
+    source: exec
+    sourceOnDemand: >-
+      libcamera-vid
+      -t 0
+      --inline
+      --listen
+      -o -
+      --width 1280
+      --height 720
+      --framerate 15
 
   # Settings under path "all_others" are applied to all paths that
   # do not match another entry.
