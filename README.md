@@ -1,42 +1,46 @@
 # EgocentricVision
 
 # IPアドレスを固定する
+## Raspberry Pi OSでIPアドレスを固定する方法
 
-## IPアドレスを固定するスクリプト
+Raspberry Pi OSでは、`/etc/dhcpcd.conf`ファイルを編集してIPアドレスを固定します。
 
-macOSでネットワークインターフェースのIPアドレスを固定するには、`set_static_ip.sh`スクリプトを利用できます。
+### 設定手順
 
-### 使い方
+1. ターミナルで以下のコマンドを実行して設定ファイルを開きます：
 
-1. ターミナルで本リポジトリのディレクトリに移動します。
-2. スクリプトに実行権限を付与します：
-
-   ```zsh
-   chmod +x ./scripts/set_static_ip.sh
+   ```sh
+   sudo nano /etc/dhcpcd.conf
    ```
 
-3. 以下のコマンドでIPアドレスを固定します（管理者権限が必要です）：
+2. ファイルの末尾に以下のように追記します（例: 有線LANの場合は`eth0`、無線LANの場合は`wlan0`）：
 
-   ```zsh
-   sudo ./scripts/set_static_ip.sh "<インターフェース名>" <IPアドレス> <サブネットマスク> <ルーター>
    ```
-   例：
-   ```zsh
-   sudo ./scripts/set_static_ip.sh "Wi-Fi" 192.168.1.100 255.255.255.0 192.168.1.1
+   interface eth0
+   static ip_address=192.168.1.100/24
+   static routers=192.168.1.1
+   static domain_name_servers=8.8.8.8 8.8.4.4
+   ```
+   - `interface`：設定したいインターフェース名（`ip a`コマンドで確認可能）
+   - `static ip_address`：割り当てたい固定IPアドレス（例: 192.168.1.100/24）
+   - `static routers`：ルーター（ゲートウェイ）アドレス
+   - `static domain_name_servers`：DNSサーバーアドレス
+
+3. 保存してエディタを終了し、Raspberry Piを再起動します：
+
+   ```sh
+   sudo reboot
    ```
 
-- `<インターフェース名>` には `networksetup -listallnetworkservices` で確認できる名称を指定してください。
-- 変更後、ネットワーク接続が一時的に切断される場合があります。
-
-#### ルーター（ゲートウェイ）アドレスの確認方法
+#### ルーター（ゲートウェイ）アドレスの確認方法（Raspberry Pi OS）
 
 ターミナルで以下のコマンドを実行してください：
 
-```zsh
-route -n get default | grep 'gateway'
+```sh
+ip route | grep default
 ```
 
-または、ネットワーク設定画面でも確認できます。
+`default via`の後ろに表示されるアドレスがルーター（ゲートウェイ）です。
 
 # Mediamtxをインストールする
 
