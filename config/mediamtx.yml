@@ -724,6 +724,8 @@ paths:
   # example:
   # my_camera:
   #   source: rtsp://my_camera
+  my_camera:
+    source: rpiCamera
 
   # Settings under path "all_others" are applied to all paths that
   # do not match another entry.
