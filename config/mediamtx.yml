@@ -7,7 +7,7 @@
 # Global settings -> General
 
 # Verbosity of the program; available values are "error", "warn", "info", "debug".
-logLevel: info
+logLevel: warn
 # Destinations of log messages; available values are "stdout", "file" and "syslog".
 logDestinations: [stdout]
 # If "file" is in logDestinations, this is the file which will receive the logs.
@@ -274,7 +274,7 @@ rtspAuthMethods: [basic]
 # Global settings -> RTMP server
 
 # Enable publishing and reading streams with the RTMP protocol.
-rtmp: yes
+rtmp: no
 # Address of the RTMP listener. This is needed only when encryption is "no" or "optional".
 rtmpAddress: :1935
 # Encrypt connections with TLS (RTMPS).
@@ -294,7 +294,7 @@ rtmpServerCert: server.crt
 # Global settings -> HLS server
 
 # Enable reading streams with the HLS protocol.
-hls: yes
+hls: no
 # Address of the HLS listener.
 hlsAddress: :8888
 # Enable TLS/HTTPS on the HLS server.
@@ -408,7 +408,7 @@ webrtcSTUNGatherTimeout: 5s
 # Global settings -> SRT server
 
 # Enable publishing and reading streams with the SRT protocol.
-srt: yes
+srt: no
 # Address of the SRT listener.
 srtAddress: :8890
 
@@ -534,9 +534,9 @@ pathDefaults:
   # Whether this is a secondary stream.
   rpiCameraSecondary: false
   # Width of frames.
-  rpiCameraWidth: 1280
+  rpiCameraWidth: 640
   # Height of frames.
-  rpiCameraHeight: 720
+  rpiCameraHeight: 360
   # Flip horizontally.
   rpiCameraHFlip: false
   # Flip vertically.
@@ -580,7 +580,7 @@ pathDefaults:
   # bit-depth and packing are optional.
   rpiCameraMode:
   # frames per second.
-  rpiCameraFPS: 30
+  rpiCameraFPS: 2
   # Autofocus mode.
   # values: auto, manual, continuous.
   rpiCameraAfMode: continuous
@@ -607,11 +607,11 @@ pathDefaults:
   # format is the one of the strftime() function.
   rpiCameraTextOverlay: '%Y-%m-%d %H:%M:%S - MediaMTX'
   # Codec. Available values: auto, hardwareH264, softwareH264, mjpeg.
-  rpiCameraCodec: auto
+  rpiCameraCodec: softwareH264
   # Period between H264 IDR frames.
   rpiCameraIDRPeriod: 60
   # H264 Bitrate.
-  rpiCameraBitrate: 5000000
+  rpiCameraBitrate: 1000000
   # H264 profile.
   rpiCameraProfile: main
   # H264 level.
@@ -722,13 +722,7 @@ pathDefaults:
 # for example "~^prefix" will match all paths that start with "prefix".
 paths:
   cam:
-    # 1. ソースの種類として「exec」を指定します
-    source: exec
-
-    # 2. 実行するコマンドを「sourceOnDemand」に記述します
-    #    (ストリームがリクエストされた時にコマンドが実行されます)
-    sourceOnDemand: >-
-      libcamera-vid -t 0 --inline --width 1280 --height 720 --framerate 15 -o -
+    source: rpiCamera
 
   # Settings under path "all_others" are applied to all paths that
   # do not match another entry.
