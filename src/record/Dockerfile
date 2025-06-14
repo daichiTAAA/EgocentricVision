@@ -49,6 +49,7 @@ COPY src ./src
 COPY migrations ./migrations
 
 # Build the actual application
+COPY .sqlx ./.sqlx
 RUN cargo build --release
 
 # Runtime stage

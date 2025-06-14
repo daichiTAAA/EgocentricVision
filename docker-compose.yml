@@ -26,6 +26,7 @@ services:
     environment:
       RECORD_DATABASE__URL: "postgres://user:password@postgres:5432/egocentric_vision"
       RECORD_RECORDING_DIRECTORY: "/var/data/recordings"
+      GST_DEBUG_DUMP_DOT_DIR: "/tmp"
     volumes:
       - ./config:/app/config:ro
       - ./recordings_data:/var/data/recordings

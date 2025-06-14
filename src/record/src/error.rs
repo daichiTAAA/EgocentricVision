@@ -5,6 +5,7 @@ use axum::{
     Json,
 };
 use serde_json::json;
+use gstreamer::PadLinkError;
 
 #[derive(Error, Debug)]
 pub enum RecordError {
@@ -100,5 +101,11 @@ impl IntoResponse for RecordError {
         }));
 
         (status, body).into_response()
+    }
+}
+
+impl From<PadLinkError> for RecordError {
+    fn from(err: PadLinkError) -> Self {
+        RecordError::StreamError(format!("PadLinkError: {}", err))
     }
 }

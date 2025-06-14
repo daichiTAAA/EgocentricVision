@@ -16,7 +16,7 @@ impl Database {
         }
 
         let pool = PgPool::connect(database_url).await?;
-        
+
         Ok(Database { pool })
     }
 
@@ -33,34 +33,22 @@ impl Database {
         start_time: DateTime<Utc>,
     ) -> Result<Recording, RecordError> {
         let status = RecordingStatus::Recording;
-        let row = sqlx::query(
+        let recording = sqlx::query_as!(
+            Recording,
             r#"
             INSERT INTO recordings (id, file_name, file_path, start_time, status, created_at, updated_at)
             VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
             RETURNING id, file_name, file_path, start_time, end_time, duration_seconds, 
-                      file_size_bytes, status, created_at, updated_at
+                      file_size_bytes, status AS "status: _", created_at, updated_at
             "#,
+            id,
+            file_name,
+            file_path,
+            start_time,
+            status as _,
         )
-        .bind(id)
-        .bind(&file_name)
-        .bind(&file_path)
-        .bind(start_time)
-        .bind(status)
         .fetch_one(&self.pool)
         .await?;
-
-        let recording = Recording {
-            id: row.get("id"),
-            file_name: row.get("file_name"),
-            file_path: row.get("file_path"),
-            start_time: row.get("start_time"),
-            end_time: row.get("end_time"),
-            duration_seconds: row.get("duration_seconds"),
-            file_size_bytes: row.get("file_size_bytes"),
-            status: row.get("status"),
-            created_at: row.get("created_at"),
-            updated_at: row.get("updated_at"),
-        };
 
         Ok(recording)
     }
@@ -73,36 +61,24 @@ impl Database {
         file_size_bytes: i64,
     ) -> Result<Recording, RecordError> {
         let status = RecordingStatus::Completed;
-        let row = sqlx::query(
+        let recording = sqlx::query_as!(
+            Recording,
             r#"
             UPDATE recordings 
             SET end_time = $2, duration_seconds = $3, file_size_bytes = $4, 
                 status = $5, updated_at = NOW()
             WHERE id = $1
             RETURNING id, file_name, file_path, start_time, end_time, duration_seconds, 
-                      file_size_bytes, status, created_at, updated_at
+                      file_size_bytes, status AS "status: _", created_at, updated_at
             "#,
+            id,
+            end_time,
+            duration_seconds,
+            file_size_bytes,
+            status as _,
         )
-        .bind(id)
-        .bind(end_time)
-        .bind(duration_seconds)
-        .bind(file_size_bytes)
-        .bind(status)
         .fetch_one(&self.pool)
         .await?;
-
-        let recording = Recording {
-            id: row.get("id"),
-            file_name: row.get("file_name"),
-            file_path: row.get("file_path"),
-            start_time: row.get("start_time"),
-            end_time: row.get("end_time"),
-            duration_seconds: row.get("duration_seconds"),
-            file_size_bytes: row.get("file_size_bytes"),
-            status: row.get("status"),
-            created_at: row.get("created_at"),
-            updated_at: row.get("updated_at"),
-        };
 
         Ok(recording)
     }
@@ -110,100 +86,54 @@ impl Database {
     #[allow(dead_code)]
     pub async fn update_recording_failed(&self, id: Uuid) -> Result<Recording, RecordError> {
         let status = RecordingStatus::Failed;
-        let row = sqlx::query(
+        let recording = sqlx::query_as!(
+            Recording,
             r#"
             UPDATE recordings 
             SET status = $2, updated_at = NOW()
             WHERE id = $1
             RETURNING id, file_name, file_path, start_time, end_time, duration_seconds, 
-                      file_size_bytes, status, created_at, updated_at
+                      file_size_bytes, status AS "status: _", created_at, updated_at
             "#,
+            id,
+            status as _,
         )
-        .bind(id)
-        .bind(status)
         .fetch_one(&self.pool)
         .await?;
-
-        let recording = Recording {
-            id: row.get("id"),
-            file_name: row.get("file_name"),
-            file_path: row.get("file_path"),
-            start_time: row.get("start_time"),
-            end_time: row.get("end_time"),
-            duration_seconds: row.get("duration_seconds"),
-            file_size_bytes: row.get("file_size_bytes"),
-            status: row.get("status"),
-            created_at: row.get("created_at"),
-            updated_at: row.get("updated_at"),
-        };
 
         Ok(recording)
     }
 
     pub async fn get_recording(&self, id: Uuid) -> Result<Recording, RecordError> {
-        let row = sqlx::query(
+        let recording = sqlx::query_as!(
+            Recording,
             r#"
             SELECT id, file_name, file_path, start_time, end_time, duration_seconds, 
-                   file_size_bytes, status, created_at, updated_at
+                   file_size_bytes, status AS "status: _", created_at, updated_at
             FROM recordings 
             WHERE id = $1
             "#,
+            id
         )
-        .bind(id)
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| RecordError::RecordingNotFound(id.to_string()))?;
-
-        let recording = Recording {
-            id: row.get("id"),
-            file_name: row.get("file_name"),
-            file_path: row.get("file_path"),
-            start_time: row.get("start_time"),
-            end_time: row.get("end_time"),
-            duration_seconds: row.get("duration_seconds"),
-            file_size_bytes: row.get("file_size_bytes"),
-            status: match row.get::<String, _>("status").as_str() {
-                "RECORDING" => RecordingStatus::Recording,
-                "COMPLETED" => RecordingStatus::Completed,
-                "FAILED" => RecordingStatus::Failed,
-                _ => RecordingStatus::Failed,
-            },
-            created_at: row.get("created_at"),
-            updated_at: row.get("updated_at"),
-        };
 
         Ok(recording)
     }
 
     pub async fn list_recordings(&self) -> Result<Vec<Recording>, RecordError> {
-        let rows = sqlx::query(
+        let recordings = sqlx::query_as!(
+            Recording,
             r#"
             SELECT id, file_name, file_path, start_time, end_time, duration_seconds, 
-                   file_size_bytes, status, created_at, updated_at
+                   file_size_bytes, status as "status: _", created_at, updated_at
             FROM recordings 
             ORDER BY start_time DESC
             "#,
         )
         .fetch_all(&self.pool)
         .await?;
-
-        let recordings = rows.into_iter().map(|row| Recording {
-            id: row.get("id"),
-            file_name: row.get("file_name"),
-            file_path: row.get("file_path"),
-            start_time: row.get("start_time"),
-            end_time: row.get("end_time"),
-            duration_seconds: row.get("duration_seconds"),
-            file_size_bytes: row.get("file_size_bytes"),
-            status: match row.get::<String, _>("status").as_str() {
-                "RECORDING" => RecordingStatus::Recording,
-                "COMPLETED" => RecordingStatus::Completed,
-                "FAILED" => RecordingStatus::Failed,
-                _ => RecordingStatus::Failed,
-            },
-            created_at: row.get("created_at"),
-            updated_at: row.get("updated_at"),
-        }).collect();
 
         Ok(recordings)
     }
