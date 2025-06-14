@@ -85,14 +85,14 @@ impl StreamManager {
         status.push_str(&format!("  Tee Ready: {}\n", self.is_tee_ready.load(Ordering::SeqCst)));
         
         if let Some(pipeline) = pipeline_lock.as_ref() {
-            let (current_state, pending_state) = pipeline.state(gstreamer::ClockTime::ZERO);
+            let (_, current_state, pending_state) = pipeline.state(gstreamer::ClockTime::ZERO);
             status.push_str(&format!("  Pipeline State: {:?} (pending: {:?})\n", current_state, pending_state));
         } else {
             status.push_str("  Pipeline: None\n");
         }
         
         if let Some(tee) = tee_lock.as_ref() {
-            let (current_state, pending_state) = tee.state(gstreamer::ClockTime::ZERO);
+            let (_, current_state, pending_state) = tee.state(gstreamer::ClockTime::ZERO);
             status.push_str(&format!("  Tee State: {:?} (pending: {:?})\n", current_state, pending_state));
         } else {
             status.push_str("  Tee: None\n");
@@ -119,7 +119,7 @@ impl StreamManager {
             .property("location", &url)
             .property("latency", &0u32)
             .property("timeout", &20u64)  // 20 second timeout
-            .property("retry", &3i32)     // Retry 3 times
+            .property("retry", &3u32)     // Retry 3 times
             .property("do-retransmission", &true)  // Enable retransmission
             .build()?;
         let depay = ElementFactory::make("rtph264depay").build()?;
@@ -175,7 +175,7 @@ impl StreamManager {
                     debug!(
                         "GStreamer: Stream status from {}: {:?}",
                         stream_status.src().map_or_else(|| "Unknown".to_string(), |s| s.path_string().to_string()),
-                        stream_status.stream_status_type()
+                        stream_status.stream_status_object()
                     );
                 }
                 MessageView::NewClock(new_clock) => {
@@ -257,10 +257,10 @@ impl StreamManager {
         // Wait for pipeline to reach PLAYING state
         let state_change_result = pipeline.state(gstreamer::ClockTime::from_seconds(10));
         match state_change_result {
-            (State::Playing, State::VoidPending) => {
+            (_, State::Playing, State::VoidPending) => {
                 info!("Pipeline successfully reached PLAYING state");
             },
-            (current_state, pending_state) => {
+            (_, current_state, pending_state) => {
                 warn!("Pipeline state change incomplete: current={:?}, pending={:?}", current_state, pending_state);
                 // Continue anyway, as some RTSP streams may take time to negotiate
             }
