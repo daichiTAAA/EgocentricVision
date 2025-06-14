@@ -289,24 +289,23 @@ impl StreamManager {
 
         info!("Creating recording pipeline for file: {}", location);
 
-        // Create recording Bin: identity_tee -> queue -> identity_pre_parse -> h264parse -> mp4mux -> identity -> filesink
+        // Create recording Bin: queue -> h264parse -> mp4mux -> filesink
         let rec_bin = {
             let queue = ElementFactory::make("queue").build()?;
-            let identity_pre_parse = ElementFactory::make("identity").property("signal-handoffs", &true).build()?;
-            // h264parseは削除
+            let parse = ElementFactory::make("h264parse")
+                .property("config-interval", &-1i32)
+                .build()?;
             let mux = ElementFactory::make("mp4mux").property("streamable", &true).build()?;
-            let identity = ElementFactory::make("identity").property("signal-handoffs", &true).build()?;
             let sink = ElementFactory::make("filesink").property("location", location).property("async", &false).build()?;
 
-            // handoffシグナル: identity_pre_parse のみ
-            let recording_id_clone2 = recording_id.clone();
-            identity_pre_parse.connect("handoff", false, move |_values| {
-                tracing::info!("[recording {}] [rec_bin] identity_pre_parse handoff: buffer arrived", recording_id_clone2);
-                None
-            });
-
-            // --- PadProbe: h264parse関連は削除 ---
-            // mp4muxのvideo_0 padは1回だけ取得し、以降使い回す
+            // PadProbe: parse, mux, sink
+            let rec_id_probe_parse = recording_id.clone();
+            if let Some(parse_sink_pad) = parse.static_pad("sink") {
+                parse_sink_pad.add_probe(PadProbeType::BUFFER, move |_, _| {
+                    tracing::info!("[recording {}] [rec_bin] h264parse.sink BUFFER probe: buffer arrived", rec_id_probe_parse);
+                    PadProbeReturn::Ok
+                });
+            }
             let mux_video_0_pad = mux.request_pad_simple("video_0");
             let rec_id_probe_mux = recording_id.clone();
             if let Some(ref mux_sink_pad) = mux_video_0_pad {
@@ -317,32 +316,20 @@ impl StreamManager {
             } else {
                 tracing::warn!("[record bin] mp4mux video_0 pad not found at probe setup");
             }
-            let rec_id_probe_identity = recording_id.clone();
-            if let Some(identity_sink_pad) = identity.static_pad("sink") {
-                identity_sink_pad.add_probe(PadProbeType::BUFFER, move |_, _| {
-                    tracing::info!("[recording {}] [rec_bin] identity.sink BUFFER probe: buffer arrived", rec_id_probe_identity);
-                    PadProbeReturn::Ok
-                });
-            } else {
-                tracing::warn!("[record bin] identity sink pad not found at probe setup");
-            }
-            // filesinkのsink padにPadProbeを追加（padが取得できた場合のみ）
             if let Some(filesink_sink_pad) = sink.static_pad("sink") {
-                let _ = filesink_sink_pad.add_probe(PadProbeType::BUFFER, |pad, _info| {
+                filesink_sink_pad.add_probe(PadProbeType::BUFFER, |_, _| {
                     tracing::info!("[record bin] filesink sink pad: buffer arrived");
                     PadProbeReturn::Ok
                 });
             } else {
                 tracing::warn!("[record bin] filesink sink pad not found at probe setup");
             }
-            // --- 追加ここまで ---
 
             let bin = Bin::with_name(&format!("rec-bin-{}", recording_id));
-            // add_manyからparseを除外
-            let add_result = bin.add_many(&[&queue, &identity_pre_parse, &mux, &identity, &sink]);
+            let add_result = bin.add_many(&[&queue, &parse, &mux, &sink]);
             tracing::info!("[recording {}] bin.add_many result: {:?}", recording_id, add_result);
 
-            // ghost pad生成・add・set_active・add_pad・link_manyの順序を厳密化
+            // ghost pad生成
             let queue_sink_pad = match queue.static_pad("sink") {
                 Some(pad) => pad,
                 None => {
@@ -350,15 +337,6 @@ impl StreamManager {
                     return Err(RecordError::StreamError("queue.sink pad not found".to_string()));
                 }
             };
-            tracing::info!("[recording {}] [before ghost] queue.sink: is_active={}, is_linked={}, caps={:?}, peer={:?}",
-                recording_id,
-                queue_sink_pad.is_active(),
-                queue_sink_pad.is_linked(),
-                queue_sink_pad.current_caps(),
-                queue_sink_pad.peer().map(|p| p.name())
-            );
-
-            // ghost pad生成
             let ghost_pad = match GhostPad::with_target(&queue_sink_pad) {
                 Ok(pad) => pad,
                 Err(e) => {
@@ -366,33 +344,7 @@ impl StreamManager {
                     return Err(RecordError::StreamError("ghost pad creation failed".to_string()));
                 }
             };
-            tracing::info!("[recording {}] [after ghost create] ghost_pad: is_active={}, is_linked={}, target={:?}, direction={:?}, caps={:?}, peer={:?}",
-                recording_id,
-                ghost_pad.is_active(),
-                ghost_pad.is_linked(),
-                ghost_pad.target().map(|p| p.name()),
-                ghost_pad.direction(),
-                ghost_pad.current_caps(),
-                ghost_pad.peer().map(|p| p.name())
-            );
-            tracing::info!("[recording {}] [after ghost create] queue.sink: is_active={}, is_linked={}, caps={:?}, peer={:?}",
-                recording_id,
-                queue_sink_pad.is_active(),
-                queue_sink_pad.is_linked(),
-                queue_sink_pad.current_caps(),
-                queue_sink_pad.peer().map(|p| p.name())
-            );
-            // active化
             let _ = ghost_pad.set_active(true);
-            tracing::info!("[recording {}] [after ghost set_active] ghost_pad: is_active={}, is_linked={}, target={:?}, direction={:?}, caps={:?}, peer={:?}",
-                recording_id,
-                ghost_pad.is_active(),
-                ghost_pad.is_linked(),
-                ghost_pad.target().map(|p| p.name()),
-                ghost_pad.direction(),
-                ghost_pad.current_caps(),
-                ghost_pad.peer().map(|p| p.name())
-            );
             let add_pad_res = bin.add_pad(&ghost_pad);
             tracing::info!("[recording {}] [after bin.add_pad] ghost_pad: is_active={}, is_linked={}, target={:?}, direction={:?}, add_pad_res={:?}, caps={:?}, peer={:?}",
                 recording_id,
@@ -404,41 +356,10 @@ impl StreamManager {
                 ghost_pad.current_caps(),
                 ghost_pad.peer().map(|p| p.name())
             );
-            tracing::info!("[recording {}] [after bin.add_pad] queue.sink: is_active={}, is_linked={}, caps={:?}, peer={:?}",
-                recording_id,
-                queue_sink_pad.is_active(),
-                queue_sink_pad.is_linked(),
-                queue_sink_pad.current_caps(),
-                queue_sink_pad.peer().map(|p| p.name())
-            );
-            let rec_bin = bin.name().to_string();
-            tracing::info!("[recording {}] rec_bin created: {}", recording_id, rec_bin);
 
-            // 直列リンク（parseを除外）
-            let link_result = Element::link_many(&[&queue, &identity_pre_parse, &mux, &identity, &sink]);
+            // 直列リンク
+            let link_result = Element::link_many(&[&queue, &parse, &mux, &sink]);
             tracing::info!("[recording {}] Element::link_many result: {:?}", recording_id, link_result);
-            // link_many直後のqueue.sink, identity_pre_parse.sink, mux.video_0, identity.sink, filesink.sinkのpad状態を出力
-            let pads = [
-                ("queue.sink", queue.static_pad("sink")),
-                ("identity_pre_parse.sink", identity_pre_parse.static_pad("sink")),
-                ("mux.video_0", mux_video_0_pad.clone()),
-                ("identity.sink", identity.static_pad("sink")),
-                ("filesink.sink", sink.static_pad("sink")),
-            ];
-            for (name, pad_opt) in pads.iter() {
-                if let Some(pad) = pad_opt {
-                    tracing::info!("[recording {}] [after link_many] {}: is_active={}, is_linked={}, caps={:?}, peer={:?}",
-                        recording_id,
-                        name,
-                        pad.is_active(),
-                        pad.is_linked(),
-                        pad.current_caps(),
-                        pad.peer().map(|p| p.name())
-                    );
-                } else {
-                    tracing::warn!("[recording {}] [after link_many] {}: pad not found", recording_id, name);
-                }
-            }
 
             // dotファイル出力
             let dot_path = format!("/tmp/rec_bin_{}.dot", recording_id);
