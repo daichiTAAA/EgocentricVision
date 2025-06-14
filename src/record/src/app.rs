@@ -11,9 +11,9 @@ pub struct AppState {
 impl AppState {
     pub fn new(config: Config, database: Database) -> Self {
         Self {
-            config,
+            config: config.clone(),
             database,
-            stream_manager: StreamManager::new(),
+            stream_manager: StreamManager::new(config),
         }
     }
 }

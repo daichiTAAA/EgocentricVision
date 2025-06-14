@@ -90,7 +90,7 @@ pub async fn stop(
     Ok(Json(StopRecordingResponse {
         recording_id,
         status: "RECORDING_STOPPED".to_string(),
-        message: "Recording has been stopped.".to_string(),
+        message: "Recording has been stopped and saved.".to_string(),
     }))
 }
 

@@ -36,9 +36,10 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }
 
-# GStreamer - TODO: Enable when system dependencies are available
-# gstreamer = "0.21"
-# gstreamer-app = "0.21"
+# GStreamer
+gstreamer = "0.22"
+glib = "0.19"
+
 
 # File operations
 tokio-util = { version = "0.7", features = ["io"] }

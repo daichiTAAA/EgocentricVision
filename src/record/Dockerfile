@@ -4,6 +4,9 @@ FROM rust:1.87.0-bookworm AS builder
 # Install system dependencies required for building
 RUN apt-get update && apt-get install -y \
     pkg-config \
+    libgstreamer1.0-dev \
+    libgstreamer-plugins-base1.0-dev \
+    libgstreamer-plugins-bad1.0-dev \
     libssl-dev \
     ca-certificates \
     git \
@@ -42,6 +45,10 @@ FROM debian:bookworm-slim
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     ca-certificates \
+    gstreamer1.0-plugins-base \
+    gstreamer1.0-plugins-good \
+    gstreamer1.0-plugins-bad \
+    gstreamer1.0-libav \
     && rm -rf /var/lib/apt/lists/*
 
 # Create app user

@@ -1,142 +1,276 @@
+use crate::config::Config;
+use crate::error::RecordError;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use chrono::{DateTime, Utc};
 use uuid::Uuid;
-use crate::error::RecordError;
+use gstreamer::prelude::*;
+use gstreamer::{Bin, Element, ElementFactory, GhostPad, Pipeline, State};
+use gstreamer::{StateChangeError};
+use gstreamer::parse;
+use tracing::{info, warn};
 use crate::models::StreamStatus;
+use glib::BoolError;
 
-#[derive(Debug, Clone)]
+/// ストリームの論理的な状態を保持します。
+#[derive(Debug, Clone, Default)]
 pub struct StreamState {
     pub is_connected: bool,
+    pub is_recording: bool,
     pub protocol: Option<String>,
     pub url: Option<String>,
-    pub is_recording: bool,
-    pub connected_at: Option<DateTime<Utc>>,
     pub current_recording_id: Option<Uuid>,
 }
 
-impl Default for StreamState {
-    fn default() -> Self {
-        Self {
-            is_connected: false,
-            protocol: None,
-            url: None,
-            is_recording: false,
-            connected_at: None,
-            current_recording_id: None,
-        }
-    }
-}
-
-impl From<StreamState> for StreamStatus {
-    fn from(state: StreamState) -> Self {
-        Self {
-            is_connected: state.is_connected,
-            protocol: state.protocol,
-            url: state.url,
-            is_recording: state.is_recording,
-            connected_at: state.connected_at,
-        }
-    }
-}
-
+/// GStreamerパイプラインとストリーム状態を管理します。
+#[derive(Debug)]
 pub struct StreamManager {
     state: Arc<Mutex<StreamState>>,
+    pipeline: Arc<Mutex<Option<Pipeline>>>,
+    config: Config,
 }
 
 impl StreamManager {
-    pub fn new() -> Self {
+    /// 新しいStreamManagerインスタンスを作成し、GStreamerを初期化します。
+    pub fn new(config: Config) -> Self {
+        if let Err(e) = gstreamer::init() {
+            panic!("Failed to initialize GStreamer: {}", e);
+        }
         Self {
             state: Arc::new(Mutex::new(StreamState::default())),
+            pipeline: Arc::new(Mutex::new(None)),
+            config,
         }
     }
 
-    pub async fn get_status(&self) -> StreamStatus {
-        let state = self.state.lock().await;
-        state.clone().into()
+    /// 現在のストリーム状態を返します。
+    pub async fn get_status(&self) -> StreamState {
+        self.state.lock().await.clone()
     }
 
+    /// ストリーム接続状態を返す
+    pub async fn is_connected(&self) -> bool {
+        self.state.lock().await.is_connected
+    }
+    /// 録画状態を返す
+    pub async fn is_recording(&self) -> bool {
+        self.state.lock().await.is_recording
+    }
+
+    /// RTSPストリームに接続し、再生準備ができたパイプラインを構築します。
     pub async fn connect(&self, protocol: String, url: String) -> Result<(), RecordError> {
         let mut state = self.state.lock().await;
-        
+        let mut pipeline_lock = self.pipeline.lock().await;
+
         if state.is_connected {
-            return Err(RecordError::StreamError("Already connected to a stream".to_string()));
+            return Err(RecordError::StreamError(
+                "Already connected to a stream".to_string(),
+            ));
         }
 
-        // TODO: Implement actual GStreamer pipeline creation
-        // For now, we'll just simulate the connection
+        info!(%url, "Connecting to stream");
+
+        let pipeline_str = format!(
+            "rtspsrc location={} latency=0 ! rtph264depay ! h264parse ! tee name=t",
+            url
+        );
+
+        let pipeline = parse::launch(&pipeline_str)
+            .map_err(|e| RecordError::StreamError(e.to_string()))?
+            .downcast::<Pipeline>()
+            .map_err(|_| RecordError::StreamError("Failed to create GStreamer pipeline".to_string()))?;
+
+        pipeline.set_state(State::Paused)
+            .map_err(|e| RecordError::StreamError(e.to_string()))?;
+
+        info!("Successfully created and paused pipeline.");
+
+        *pipeline_lock = Some(pipeline);
         state.is_connected = true;
         state.protocol = Some(protocol);
         state.url = Some(url);
-        state.connected_at = Some(Utc::now());
 
         Ok(())
     }
 
-    pub async fn disconnect(&self) -> Result<(), RecordError> {
-        let mut state = self.state.lock().await;
-        
-        if !state.is_connected {
-            return Err(RecordError::NotConnected);
-        }
-
-        // Stop recording if currently recording
-        if state.is_recording {
-            state.is_recording = false;
-            state.current_recording_id = None;
-        }
-
-        // TODO: Implement actual GStreamer pipeline cleanup
-        state.is_connected = false;
-        state.protocol = None;
-        state.url = None;
-        state.connected_at = None;
-
-        Ok(())
-    }
-
+    /// 録画を開始します。
     pub async fn start_recording(&self, recording_id: Uuid) -> Result<(), RecordError> {
         let mut state = self.state.lock().await;
-        
+        let pipeline_lock = self.pipeline.lock().await;
+
         if !state.is_connected {
-            return Err(RecordError::NotConnected);
+            return Err(RecordError::StreamError(
+                "Not connected to any stream".to_string(),
+            ));
         }
-        
         if state.is_recording {
-            return Err(RecordError::AlreadyRecording);
+            return Err(RecordError::StreamError(
+                "Recording is already in progress".to_string(),
+            ));
         }
 
-        // TODO: Implement actual GStreamer recording pipeline
+        let pipeline = pipeline_lock.as_ref().ok_or_else(|| {
+            RecordError::StreamError("Pipeline not found, connect to a stream first.".to_string())
+        })?;
+
+        // 設定ファイルから保存先パスを取得し、ファイル名を生成します。
+        let mut path = PathBuf::from(&self.config.recording_directory);
+        tokio::fs::create_dir_all(&path).await?; // 保存ディレクトリをなければ作成
+        path.push(format!("{}.mp4", recording_id));
+        let location = path.to_str().ok_or_else(|| {
+            RecordError::StreamError("Invalid file path for recording".to_string())
+        })?;
+
+        info!(location, "Starting recording");
+
+        // 録画用のパイプライン部品（Bin）を動的に作成します。
+        let rec_bin = {
+            let bin = Bin::new();
+            let queue = ElementFactory::make("queue").build()?;
+            let mux = ElementFactory::make("mp4mux").build()?;
+            let sink = ElementFactory::make("filesink").build()?;
+            sink.set_property("location", location);
+
+            bin.add_many(&[&queue, &mux, &sink])?;
+            Element::link_many(&[&queue, &mux, &sink])?;
+
+            // Binの入力パッドを作成
+            let pad = queue.static_pad("sink").ok_or_else(|| RecordError::StreamError("No static pad 'sink' on queue".to_string()))?;
+            let ghost_pad = GhostPad::with_target(&pad)?;
+            bin.add_pad(&ghost_pad)?;
+            bin
+        };
+
+        pipeline.add(&rec_bin)?;
+
+        // メインパイプラインの'tee'要素に録画用Binを接続します。
+        let tee = pipeline
+            .by_name("t")
+            .ok_or_else(|| RecordError::StreamError("Could not find 'tee' element".to_string()))?;
+        tee.link(&rec_bin)?;
+
+        // パイプラインがまだ再生中でなければ、PLAYING状態に移行します。
+        if pipeline.current_state() != State::Playing {
+            pipeline.set_state(State::Playing)?;
+            info!("Pipeline state changed to PLAYING");
+        }
+        // すでに再生中であれば、新しいBinの状態を同期させます。
+        rec_bin.sync_state_with_parent()?;
+
         state.is_recording = true;
         state.current_recording_id = Some(recording_id);
 
         Ok(())
     }
 
+    /// 録画を停止します。
     pub async fn stop_recording(&self) -> Result<Uuid, RecordError> {
         let mut state = self.state.lock().await;
-        
+        let pipeline_lock = self.pipeline.lock().await;
+
         if !state.is_recording {
-            return Err(RecordError::StreamError("Not currently recording".to_string()));
+            return Err(RecordError::StreamError(
+                "No recording is currently in progress".to_string(),
+            ));
         }
 
-        let recording_id = state.current_recording_id
-            .ok_or_else(|| RecordError::InternalError("No recording ID found".to_string()))?;
+        let recording_id = state.current_recording_id.take().ok_or_else(|| RecordError::StreamError("No current recording id".to_string()))?;
+        info!(%recording_id, "Stopping recording");
 
-        // TODO: Implement actual GStreamer recording pipeline stop
+        let pipeline = pipeline_lock
+            .as_ref()
+            .ok_or_else(|| RecordError::StreamError("Pipeline not found.".to_string()))?;
+
+        // 録画用Binとtee要素を取得
+        let bin_name = format!("rec-bin-{}", recording_id);
+        let rec_bin = pipeline
+            .by_name(&bin_name)
+            .ok_or_else(|| RecordError::StreamError(format!("Could not find bin '{}'", bin_name)))?;
+        let tee = pipeline
+            .by_name("t")
+            .ok_or_else(|| RecordError::StreamError("Could not find 'tee' element".to_string()))?;
+
+        // teeから録画Binへのデータフローをブロックし、EOS(End-of-Stream)イベントを送信します。
+        let tee_src_pad = rec_bin.static_pad("sink").and_then(|p| p.peer()).ok_or_else(|| RecordError::StreamError("Could not get peer pad".to_string()))?;
+        tee_src_pad.add_probe(gstreamer::PadProbeType::BLOCK_DOWNSTREAM, move |pad, _| {
+            info!("Sending EOS to recording bin to finalize file.");
+            pad.send_event(gstreamer::event::Eos::new());
+            gstreamer::PadProbeReturn::Remove
+        });
+
+        // ファイル終端処理のために少し待機します。
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        // teeからBinを切り離し、パイプラインから削除します。
+        tee.unlink(&rec_bin);
+        pipeline.remove(&rec_bin)?;
+        rec_bin.set_state(State::Null)?;
+        
+        info!(%recording_id, "Recording bin removed and file saved.");
+
         state.is_recording = false;
-        state.current_recording_id = None;
-
         Ok(recording_id)
     }
 
-    pub async fn is_connected(&self) -> bool {
-        let state = self.state.lock().await;
-        state.is_connected
-    }
+    /// ストリームから切断し、パイプラインを停止・破棄します。
+    pub async fn disconnect(&self) -> Result<(), RecordError> {
+        let mut state = self.state.lock().await;
+        let mut pipeline_lock = self.pipeline.lock().await;
 
-    pub async fn is_recording(&self) -> bool {
-        let state = self.state.lock().await;
-        state.is_recording
+        if !state.is_connected {
+            warn!("Not connected, nothing to do.");
+            return Ok(());
+        }
+
+        if let Some(pipeline) = pipeline_lock.take() {
+            // 録画中であれば、まず録画を停止する
+            if state.is_recording {
+                warn!("Recording was in progress during disconnect. Stopping it first.");
+                drop(state);
+                drop(pipeline_lock);
+                self.stop_recording().await?;
+                state = self.state.lock().await;
+            }
+
+            info!("Disconnecting from stream and stopping pipeline...");
+            pipeline.set_state(State::Null)?;
+            info!("Pipeline stopped successfully.");
+        }
+
+        *state = StreamState::default();
+
+        Ok(())
+    }
+}
+
+// StreamState→StreamStatus変換
+impl From<&StreamState> for StreamStatus {
+    fn from(state: &StreamState) -> Self {
+        StreamStatus {
+            is_connected: state.is_connected,
+            protocol: state.protocol.clone(),
+            url: state.url.clone(),
+            is_recording: state.is_recording,
+            connected_at: None, // 必要なら状態に追加
+        }
+    }
+}
+
+// GStreamerのエラー型はglib::Errorなので、必要ならFrom<glib::Error> for RecordErrorを実装
+impl From<glib::Error> for RecordError {
+    fn from(err: glib::Error) -> Self {
+        RecordError::StreamError(err.to_string())
+    }
+}
+// GStreamer BoolError
+impl From<BoolError> for RecordError {
+    fn from(err: BoolError) -> Self {
+        RecordError::StreamError(err.to_string())
+    }
+}
+// GStreamer StateChangeError
+impl From<StateChangeError> for RecordError {
+    fn from(err: StateChangeError) -> Self {
+        RecordError::StreamError(err.to_string())
     }
 }

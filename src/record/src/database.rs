@@ -117,6 +117,7 @@ impl Database {
         Ok(recording)
     }
 
+    /*
     pub async fn update_recording_failed(&self, id: Uuid) -> Result<Recording, RecordError> {
         let status = "FAILED";
         let row = sqlx::query(
@@ -153,6 +154,7 @@ impl Database {
 
         Ok(recording)
     }
+    */
 
     pub async fn get_recording(&self, id: Uuid) -> Result<Recording, RecordError> {
         let row = sqlx::query(

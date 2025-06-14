@@ -29,8 +29,8 @@ pub enum RecordError {
     #[error("Not connected to stream")]
     NotConnected,
     
-    #[error("Pipeline error: {0}")]
-    PipelineError(String),
+    // #[error("Pipeline error: {0}")]
+    // PipelineError(String), // 未使用のためコメントアウト
     
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
@@ -77,11 +77,11 @@ impl IntoResponse for RecordError {
                 "NOT_CONNECTED",
                 "Not connected to stream".to_string(),
             ),
-            RecordError::PipelineError(msg) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "PIPELINE_ERROR",
-                msg,
-            ),
+            // RecordError::PipelineError(msg) => (
+            //     StatusCode::INTERNAL_SERVER_ERROR,
+            //     "PIPELINE_ERROR",
+            //     msg,
+            // ),
             RecordError::IoError(err) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "IO_ERROR",

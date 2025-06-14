@@ -7,7 +7,7 @@ use crate::error::RecordError;
 pub struct Config {
     pub recording_directory: PathBuf,
     pub database: DatabaseConfig,
-    pub stream: StreamConfig,
+    // pub stream: StreamConfig, // 未使用のためコメントアウト
     pub server: ServerConfig,
 }
 
@@ -16,10 +16,10 @@ pub struct DatabaseConfig {
     pub url: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
-pub struct StreamConfig {
-    pub default_rtsp_url: Option<String>,
-}
+// #[derive(Debug, Deserialize, Clone)]
+// pub struct StreamConfig {
+//     pub default_rtsp_url: Option<String>, // 未使用のためコメントアウト
+// }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ServerConfig {

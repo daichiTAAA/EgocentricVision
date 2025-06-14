@@ -62,7 +62,7 @@ curl http://localhost:3000/api/v1/recordings
 
 ### Start Recording
 ```bash
-curl -X POST http://localhost:3000/api/v1/recordings \
+curl -X POST http://localhost:3000/api/v1/recordings/start \
   -H "Content-Type: application/json" \
   -d '{"rtsp_url": "rtsp://192.168.0.18:8554/cam"}'
 ```

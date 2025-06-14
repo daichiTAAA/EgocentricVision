@@ -50,6 +50,7 @@ pub async fn disconnect(
 pub async fn status(
     State(app_state): State<Arc<AppState>>,
 ) -> Result<Json<StreamStatus>, RecordError> {
-    let status = app_state.stream_manager.get_status().await;
+    let state = app_state.stream_manager.get_status().await;
+    let status: StreamStatus = (&state).into();
     Ok(Json(status))
 }
