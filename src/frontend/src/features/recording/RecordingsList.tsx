@@ -36,7 +36,7 @@ export const RecordingsList: React.FC = () => {
   const handlePlay = async (id: string) => {
     try {
       const response = await recordingsApi.download(id);
-      const blob = new Blob([response.data], { type: 'video/mp4' });
+      const blob = response.data;
       const url = window.URL.createObjectURL(blob);
       
       const dialog = document.createElement('dialog');
@@ -118,10 +118,13 @@ export const RecordingsList: React.FC = () => {
   const handleDownload = async (id: string, filename: string) => {
     try {
       const response = await recordingsApi.download(id);
-      const contentType = response.headers['content-type'] || 'video/mp4';
-      const blob = new Blob([response.data], { type: contentType });
+      const blob = response.data;
       const url = window.URL.createObjectURL(blob);
-      const safeFilename = filename.endsWith('.mp4') ? filename : `${filename}.mp4`;
+      
+      // filenameがundefinedの場合はデフォルトのファイル名を使用
+      const safeFilename = filename && filename.endsWith('.mp4') 
+        ? filename 
+        : `${filename || 'recording'}.mp4`;
       
       const link = document.createElement('a');
       link.href = url;
