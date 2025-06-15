@@ -13,7 +13,7 @@ export const StreamPlayer: React.FC<StreamPlayerProps> = ({ rtspUrl }) => {
 
     // RTSP URLをWHEP URLに変換
     const url = new URL(rtspUrl);
-    const webrtcUrl = `http://${url.hostname}:8889/whep${url.pathname}`;
+    const webrtcUrl = `http://${url.hostname}:8889${url.pathname}/whep`;
 
     console.log('Original RTSP URL:', rtspUrl);
     console.log('Converted WHEP URL:', webrtcUrl);
