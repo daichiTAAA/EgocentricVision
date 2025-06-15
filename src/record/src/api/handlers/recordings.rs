@@ -29,6 +29,16 @@ pub async fn start(
     let location = format!("/var/data/recordings/{}.mp4", recording_id);
     info!("[recording {}] Recording file location: {}", recording_id, location);
 
+    let start_time = Utc::now();
+    let file_name = format!("{}.mp4", recording_id);
+    // DBに録画情報を登録
+    app_state.database.create_recording(
+        Uuid::parse_str(&recording_id).unwrap(),
+        file_name.clone(),
+        location.clone(),
+        start_time,
+    ).await?;
+
     let recording_id2 = recording_id.clone();
     let location2 = location.clone();
     let app_state2 = app_state.clone();

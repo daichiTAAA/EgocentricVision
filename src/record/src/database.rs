@@ -25,6 +25,10 @@ impl Database {
         Ok(())
     }
 
+    pub async fn is_connected(&self) -> bool {
+        self.pool.acquire().await.is_ok()
+    }
+
     pub async fn create_recording(
         &self,
         id: Uuid,

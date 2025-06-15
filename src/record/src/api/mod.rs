@@ -32,6 +32,7 @@ pub async fn serve(app_state: Arc<AppState>) -> Result<(), RecordError> {
 
 fn create_router(app_state: Arc<AppState>) -> Router {
     Router::new()
+        .route("/health", get(handlers::health))
         .route("/api/v1/streams/connect", post(handlers::streams::connect))
         .route("/api/v1/streams/disconnect", post(handlers::streams::disconnect))
         .route("/api/v1/streams/status", get(handlers::streams::status))
