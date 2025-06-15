@@ -181,44 +181,75 @@ export const RecordingsList: React.FC = () => {
                 <ListItemText
                   primary={recording.filename}
                   secondary={
-                    <Box>
-                      <Typography variant="caption" component="div">
-                        開始: {new Date(recording.start_time).toLocaleString()}
-                      </Typography>
-                      <Typography variant="caption" component="div">
-                        時間: {formatDuration(recording.duration_seconds)}
-                      </Typography>
-                      <Chip
-                        label={recording.status}
-                        size="small"
-                        color={recording.status === 'COMPLETED' ? 'success' : 'default'}
-                        sx={{ mt: 0.5 }}
-                      />
+                    <Box component="span" sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+                      <Box component="span" sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                        <Chip
+                          label={recording.status}
+                          size="small"
+                          color={recording.status === 'RECORDING' ? 'error' : 'default'}
+                          sx={{ 
+                            fontWeight: 'bold',
+                            backgroundColor: recording.status === 'RECORDING' ? 'error.main' : undefined,
+                            color: recording.status === 'RECORDING' ? 'white' : undefined
+                          }}
+                        />
+                        <Typography variant="caption" component="span">
+                          {recording.status === 'RECORDING' ? '録画中' : 
+                           recording.duration_seconds === null ? '長さ: 不明' : 
+                           `長さ: ${formatDuration(recording.duration_seconds)}`}
+                        </Typography>
+                      </Box>
+                      <Box component="span" sx={{ display: 'flex', flexDirection: 'column', gap: 0.2 }}>
+                        <Typography variant="caption" component="div">
+                          開始: {new Date(recording.start_time).toLocaleString()}
+                        </Typography>
+                        <Typography variant="caption" component="div">
+                          終了: {recording.end_time ? new Date(recording.end_time).toLocaleString() : '録画中'}
+                        </Typography>
+                      </Box>
                     </Box>
                   }
                 />
                 <ListItemSecondaryAction>
-                  <IconButton 
-                    edge="end" 
-                    aria-label="play" 
-                    sx={{ mr: 1 }}
+                  <IconButton
                     onClick={() => handlePlay(recording.id)}
+                    disabled={recording.status === 'RECORDING' || recording.duration_seconds === null}
+                    size="small"
+                    sx={{ 
+                      color: (recording.status === 'RECORDING' || recording.duration_seconds === null) ? 'text.disabled' : 'primary.main',
+                      opacity: (recording.status === 'RECORDING' || recording.duration_seconds === null) ? 0.5 : 1,
+                      '&:hover': {
+                        backgroundColor: (recording.status === 'RECORDING' || recording.duration_seconds === null) ? 'transparent' : undefined
+                      }
+                    }}
                   >
                     <PlayArrow />
                   </IconButton>
-                  <IconButton 
-                    edge="end" 
-                    aria-label="download" 
-                    sx={{ mr: 1 }}
+                  <IconButton
                     onClick={() => handleDownload(recording.id, recording.filename)}
+                    disabled={recording.status === 'RECORDING' || recording.duration_seconds === null}
+                    size="small"
+                    sx={{ 
+                      color: (recording.status === 'RECORDING' || recording.duration_seconds === null) ? 'text.disabled' : 'primary.main',
+                      opacity: (recording.status === 'RECORDING' || recording.duration_seconds === null) ? 0.5 : 1,
+                      '&:hover': {
+                        backgroundColor: (recording.status === 'RECORDING' || recording.duration_seconds === null) ? 'transparent' : undefined
+                      }
+                    }}
                   >
                     <Download />
                   </IconButton>
                   <IconButton
-                    edge="end"
-                    aria-label="delete"
                     onClick={() => handleDelete(recording.id)}
-                    disabled={deleteRecordingMutation.isPending}
+                    disabled={recording.status === 'RECORDING' || recording.duration_seconds === null}
+                    size="small"
+                    sx={{ 
+                      color: (recording.status === 'RECORDING' || recording.duration_seconds === null) ? 'text.disabled' : 'error.main',
+                      opacity: (recording.status === 'RECORDING' || recording.duration_seconds === null) ? 0.5 : 1,
+                      '&:hover': {
+                        backgroundColor: (recording.status === 'RECORDING' || recording.duration_seconds === null) ? 'transparent' : undefined
+                      }
+                    }}
                   >
                     <Delete />
                   </IconButton>
