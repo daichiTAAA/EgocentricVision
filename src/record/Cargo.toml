@@ -39,7 +39,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # GStreamer
 gstreamer = "0.22"
 glib = "0.19"
-
+gstreamer-rtsp = "0.22"
 
 # File operations
 tokio-util = { version = "0.7", features = ["io"] }

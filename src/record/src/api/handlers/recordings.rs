@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::path::PathBuf;
 use uuid::Uuid;
 use chrono::Utc;
-use tracing::info;
+use tracing::{info, error};
 use tokio_util::io::ReaderStream;
 use crate::app::AppState;
 use crate::error::RecordError;
@@ -24,11 +24,13 @@ pub async fn start(
 
     // Check if stream is connected
     if !app_state.stream_manager.is_connected().await {
+        error!("Failed to start recording: Stream is not connected");
         return Err(RecordError::NotConnected);
     }
 
     // Check if already recording
     if app_state.stream_manager.is_recording().await {
+        error!("Failed to start recording: Already recording");
         return Err(RecordError::AlreadyRecording);
     }
 
@@ -37,16 +39,26 @@ pub async fn start(
     let file_name = format!("rec_{}.mp4", start_time.format("%Y%m%d_%H%M%S"));
     let file_path = app_state.config.recording_directory.join(&file_name);
 
+    info!("Creating recording entry in database: id={}, file={}", recording_id, file_path.display());
+
     // Create recording entry in database
     let _recording = app_state.database.create_recording(
         recording_id,
         file_name,
         file_path.to_string_lossy().to_string(),
         start_time,
-    ).await?;
+    ).await.map_err(|e| {
+        error!("Failed to create recording entry in database: {}", e);
+        e
+    })?;
+
+    info!("Starting recording in stream manager: id={}", recording_id);
 
     // Start recording in stream manager
-    app_state.stream_manager.start_recording(recording_id).await?;
+    app_state.stream_manager.start_recording(recording_id).await.map_err(|e| {
+        error!("Failed to start recording in stream manager: {} (recording_id={})", e, recording_id);
+        e
+    })?;
 
     info!("Successfully started recording with ID: {}", recording_id);
 
@@ -63,19 +75,37 @@ pub async fn stop(
     info!("Received recording stop request");
 
     // Stop recording in stream manager
-    let recording_id = app_state.stream_manager.stop_recording().await?;
+    let recording_id = app_state.stream_manager.stop_recording().await.map_err(|e| {
+        error!("Failed to stop recording in stream manager: {}", e);
+        e
+    })?;
 
     let end_time = Utc::now();
     
+    info!("Getting recording details from database: id={}", recording_id);
+    
     // Get the recording to calculate duration and file size
-    let recording = app_state.database.get_recording(recording_id).await?;
+    let recording = app_state.database.get_recording(recording_id).await.map_err(|e| {
+        error!("Failed to get recording details from database: {}", e);
+        e
+    })?;
+    
     let duration = (end_time - recording.start_time).num_seconds();
     
     // Get file size
     let file_size = match std::fs::metadata(&recording.file_path) {
-        Ok(metadata) => metadata.len() as i64,
-        Err(_) => 0, // Default to 0 if file doesn't exist yet
+        Ok(metadata) => {
+            let size = metadata.len() as i64;
+            info!("Recording file size: {} bytes", size);
+            size
+        },
+        Err(e) => {
+            error!("Failed to get recording file metadata: {} (path={})", e, recording.file_path);
+            0 // Default to 0 if file doesn't exist yet
+        }
     };
+
+    info!("Updating recording as completed: id={}, duration={}s, size={} bytes", recording_id, duration, file_size);
 
     // Update recording as completed
     let _updated_recording = app_state.database.update_recording_completed(
@@ -83,7 +113,10 @@ pub async fn stop(
         end_time,
         duration,
         file_size,
-    ).await?;
+    ).await.map_err(|e| {
+        error!("Failed to update recording as completed: {} (recording_id={})", e, recording_id);
+        e
+    })?;
 
     info!("Successfully stopped recording with ID: {}", recording_id);
 

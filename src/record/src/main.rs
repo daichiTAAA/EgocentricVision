@@ -12,11 +12,19 @@ use database::Database;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 use tracing::{info, error, warn};
+use std::io::stderr;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing
+    // パニック時に必ずstderrにバックトレースを出力
+    std::panic::set_hook(Box::new(|panic_info| {
+        let bt = std::backtrace::Backtrace::force_capture();
+        eprintln!("\n=== PANIC ===\n{}\nBacktrace:\n{:?}\n", panic_info, bt);
+    }));
+
+    // Initialize tracing (stderr明示)
     tracing_subscriber::fmt()
+        .with_writer(stderr)
         .json()
         .init();
 

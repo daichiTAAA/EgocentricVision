@@ -9,11 +9,18 @@ use gstreamer::prelude::*;
 use gstreamer::{
     event, Bin, Element, ElementFactory, GhostPad, PadProbeReturn,
     PadProbeType, Pipeline, State, StateChangeError,
+    PadDirection, MessageView,
 };
 use tracing::{info, warn, error, debug};
 use crate::models::StreamStatus;
 use glib::BoolError;
 use std::collections::HashMap;
+use gstreamer_rtsp::prelude::*;
+use gstreamer_rtsp::RTSPUrl;
+use tokio::sync::mpsc;
+use std::time::Duration;
+use tokio::time::sleep;
+use glib::ControlFlow;
 
 /// Stores the logical state of the stream.
 #[derive(Debug, Clone, Default)]
@@ -116,16 +123,25 @@ impl StreamManager {
         let src = ElementFactory::make("rtspsrc")
             .property("location", &url)
             .property("latency", &0u32)
-            .property("timeout", &20000u64)  // 20 second timeout (u64型に変更)
+            .property("timeout", &20000u64)  // 20 second timeout
             .property("retry", &3u32)     // Retry 3 times
             .property("do-retransmission", &true)  // Enable retransmission
+            .property("ntp-sync", &true)  // NTP同期を有効化
             .build()?;
-        let identity_src = ElementFactory::make("identity").property("signal-handoffs", &true).build()?;
-        let depay = ElementFactory::make("rtph264depay").build()?;
+        let identity_src = ElementFactory::make("identity")
+            .property("signal-handoffs", &true)
+            .property("silent", &false)  // デバッグ情報を有効化
+            .build()?;
+        let depay = ElementFactory::make("rtph264depay")
+            .property("wait-for-keyframe", &true)  // キーフレームを待つ
+            .build()?;
         let parse = ElementFactory::make("h264parse")
             .property("config-interval", &-1i32)  // Send SPS/PPS with every IDR frame
+            .property("disable-passthrough", &true)  // パススルーを無効化
             .build()?;
-        let tee = ElementFactory::make("tee").name("t").build()?;
+        let tee = ElementFactory::make("tee")
+            .property("allow-not-linked", &true)  // リンクされていないパッドを許可
+            .build()?;
         
         pipeline.add_many(&[&src, &identity_src, &depay, &parse, &tee])?;
         Element::link_many(&[&identity_src, &depay, &parse, &tee])?;
@@ -136,92 +152,160 @@ impl StreamManager {
             None
         });
 
-        // Add bus watch (including StateChanged for all elements)
-        let bus = match pipeline.bus() {
-            Some(bus) => bus,
-            None => {
-                tracing::warn!("GStreamer pipeline bus not found");
-                return Err(RecordError::StreamError("Pipeline bus not found".to_string()));
-            }
-        };
-        bus.add_watch_local(move |_, msg| {
-            use gstreamer::MessageView;
+        // Add bus watch
+        let bus = pipeline.bus().unwrap();
+        let _watch_id = bus.add_watch(move |_, msg| {
             match msg.view() {
                 MessageView::Error(err) => {
-                    error!(
-                        "GStreamer Error from element {}: {} (debug: {})",
-                        err.src().map_or_else(|| "Unknown".to_string(), |s| s.path_string().to_string()),
-                        err.error(),
-                        err.debug().unwrap_or_default()
-                    );
+                    error!("Error from {:?}: {}", err.src().map(|s| s.path_string()), err.error());
+                    ControlFlow::Break
                 }
                 MessageView::Warning(warn) => {
-                    warn!(
-                        "GStreamer Warning from element {}: {} (debug: {})",
-                        warn.src().map_or_else(|| "Unknown".to_string(), |s| s.path_string().to_string()),
-                        warn.error(),
-                        warn.debug().unwrap_or_default()
+                    warn!("Warning from {:?}: {}", warn.src().map(|s| s.path_string()), warn.error());
+                    ControlFlow::Continue
+                }
+                MessageView::Eos(_) => {
+                    info!("End of stream");
+                    ControlFlow::Break
+                }
+                MessageView::StateChanged(state) => {
+                    info!(
+                        "Pipeline state changed from {:?} to {:?}",
+                        state.old(),
+                        state.current()
                     );
+                    ControlFlow::Continue
                 }
-                MessageView::Eos(..) => {
-                    debug!("GStreamer: Received EOS");
-                }
-                MessageView::StateChanged(state_changed) => {
-                    if let Some(src) = state_changed.src() {
-                        debug!(
-                            "GStreamer: Element {} state changed from {:?} to {:?}",
-                            src.path_string(),
-                            state_changed.old(),
-                            state_changed.current()
-                        );
-                    }
-                }
-                MessageView::StreamStatus(stream_status) => {
-                    debug!(
-                        "GStreamer: Stream status from {}: {:?}",
-                        stream_status.src().map_or_else(|| "Unknown".to_string(), |s| s.path_string().to_string()),
-                        stream_status.stream_status_object()
+                MessageView::StreamStatus(status) => {
+                    info!(
+                        "Stream status: {:?}",
+                        status.type_()
                     );
+                    ControlFlow::Continue
                 }
-                MessageView::NewClock(new_clock) => {
-                    if let Some(clock) = new_clock.clock() {
-                        debug!("GStreamer: New clock selected: {}", clock.name());
-                    }
+                MessageView::Buffering(buffering) => {
+                    info!(
+                        "Buffering: {}%",
+                        buffering.percent()
+                    );
+                    ControlFlow::Continue
                 }
-                _ => {
-                    info!("GStreamer: Other bus message: {:?}", msg);
-                }
+                _ => ControlFlow::Continue,
             }
-            glib::ControlFlow::Continue
-        })
-        .expect("Failed to add bus watch");
+        }).unwrap();
 
         // Create pipeline_weak in advance and move only it to the closure
         let identity_src_clone = identity_src.clone();
         let is_tee_ready_clone = self.is_tee_ready.clone();
         src.connect_pad_added(move |src_elem, src_pad| {
             info!("Received new pad '{}' from '{}'", src_pad.name(), src_elem.name());
-            let new_pad_caps = src_pad.current_caps().expect("Failed to get caps of new pad.");
-            let new_pad_struct = new_pad_caps.structure(0).expect("Failed to get structure of new pad.");
+            
+            // パッドの詳細情報をログ出力
+            info!("Pad details:");
+            info!("  - Direction: {:?}", src_pad.direction());
+            info!("  - Is linked: {}", src_pad.is_linked());
+            info!("  - Current caps: {:?}", src_pad.current_caps());
+            info!("  - Template: {:?}", src_pad.pad_template());
+            info!("  - Parent: {:?}", src_pad.parent().map(|e| e.name()));
+            info!("  - Peer: {:?}", src_pad.peer().map(|p| p.name()));
+            
+            let new_pad_caps = match src_pad.current_caps() {
+                Some(caps) => {
+                    info!("  - Caps structure: {:?}", caps.structure(0));
+                    caps
+                },
+                None => {
+                    error!("Failed to get caps of new pad");
+                    return;
+                }
+            };
+
+            let new_pad_struct = match new_pad_caps.structure(0) {
+                Some(s) => {
+                    info!("  - Structure name: {}", s.name());
+                    info!("  - Media type: {:?}", s.get::<&str>("media"));
+                    info!("  - Encoding name: {:?}", s.get::<&str>("encoding-name"));
+                    info!("  - Clock rate: {:?}", s.get::<i32>("clock-rate"));
+                    info!("  - Payload type: {:?}", s.get::<i32>("payload"));
+                    info!("  - All fields: {:?}", s.to_string());
+                    s
+                },
+                None => {
+                    error!("Failed to get structure of new pad");
+                    return;
+                }
+            };
+
+            info!("Checking pad compatibility:");
+            info!("  - Is RTP: {}", new_pad_struct.name().starts_with("application/x-rtp"));
+            info!("  - Is video: {}", new_pad_struct.get::<&str>("media").unwrap_or("") == "video");
+            info!("  - Is H264: {}", new_pad_struct.get::<&str>("encoding-name").unwrap_or("").to_uppercase() == "H264");
 
             if new_pad_struct.name().starts_with("application/x-rtp") &&
                new_pad_struct.get::<&str>("media").unwrap_or("") == "video" &&
                new_pad_struct.get::<&str>("encoding-name").unwrap_or("").to_uppercase() == "H264" {
-                let identity_src_sink = identity_src_clone.static_pad("sink").expect("Failed to get sink pad from identity_src");
+                let identity_src_sink = match identity_src_clone.static_pad("sink") {
+                    Some(pad) => {
+                        info!("Got identity_src sink pad: name={}, direction={:?}, is_linked={}, caps={:?}",
+                            pad.name(),
+                            pad.direction(),
+                            pad.is_linked(),
+                            pad.current_caps()
+                        );
+                        pad
+                    },
+                    None => {
+                        error!("Failed to get sink pad from identity_src");
+                        return;
+                    }
+                };
+
                 if identity_src_sink.is_linked() {
                     warn!("identity_src sink pad already linked. Ignoring new pad.");
                     return;
                 }
+
                 info!("Attempting to link H264 video pad to identity_src");
                 match src_pad.link(&identity_src_sink) {
                     Ok(_) => {
                         info!("Successfully linked src_pad '{}' to identity_src sink", src_pad.name());
+                        info!("Link details after successful linking:");
+                        info!("  - src_pad: name={}, direction={:?}, is_linked={}, caps={:?}, peer={:?}",
+                            src_pad.name(),
+                            src_pad.direction(),
+                            src_pad.is_linked(),
+                            src_pad.current_caps(),
+                            src_pad.peer().map(|p| p.name())
+                        );
+                        info!("  - identity_src_sink: name={}, direction={:?}, is_linked={}, caps={:?}, peer={:?}",
+                            identity_src_sink.name(),
+                            identity_src_sink.direction(),
+                            identity_src_sink.is_linked(),
+                            identity_src_sink.current_caps(),
+                            identity_src_sink.peer().map(|p| p.name())
+                        );
                         is_tee_ready_clone.store(true, Ordering::SeqCst);
+                        info!("Set is_tee_ready to true");
                     },
                     Err(e) => {
                         error!("Failed to link src_pad '{}' to identity_src sink: {:?}", src_pad.name(), e);
+                        error!("Link failure details:");
+                        error!("  - src_pad: name={}, direction={:?}, is_linked={}, caps={:?}",
+                            src_pad.name(),
+                            src_pad.direction(),
+                            src_pad.is_linked(),
+                            src_pad.current_caps()
+                        );
+                        error!("  - identity_src_sink: name={}, direction={:?}, is_linked={}, caps={:?}",
+                            identity_src_sink.name(),
+                            identity_src_sink.direction(),
+                            identity_src_sink.is_linked(),
+                            identity_src_sink.current_caps()
+                        );
                     }
                 }
+            } else {
+                info!("Pad does not match required criteria for H264 video");
             }
         });
 
@@ -252,12 +336,15 @@ impl StreamManager {
 
     /// Starts recording.
     pub async fn start_recording(&self, recording_id: Uuid) -> Result<(), RecordError> {
+        tracing::info!("[start_recording] called with recording_id={}", recording_id);
         let mut state = self.state.lock().await;
 
         if !state.is_connected {
+            tracing::error!("[start_recording] Not connected to stream");
             return Err(RecordError::NotConnected);
         }
         if state.is_recording {
+            tracing::error!("[start_recording] Already recording");
             return Err(RecordError::AlreadyRecording);
         }
 
@@ -270,16 +357,29 @@ impl StreamManager {
         }
 
         if !self.is_tee_ready.load(Ordering::SeqCst) {
+            tracing::error!("[start_recording] Tee is not ready for recording");
             return Err(RecordError::StreamError(
                 "Tee is not ready for recording. Check if RTSP stream is providing H264 video data.".into()
             ));
         }
 
         let pipeline = self.pipeline.lock().await;
-        let pipeline = pipeline.as_ref().ok_or_else(|| RecordError::StreamError("Pipeline not found".into()))?;
+        let pipeline = match pipeline.as_ref() {
+            Some(p) => p,
+            None => {
+                tracing::error!("[start_recording] Pipeline not found");
+                return Err(RecordError::StreamError("Pipeline not found".into()));
+            }
+        };
 
         let tee = self.tee.lock().await;
-        let tee = tee.as_ref().ok_or_else(|| RecordError::StreamError("Tee element not found".into()))?;
+        let tee = match tee.as_ref() {
+            Some(t) => t,
+            None => {
+                tracing::error!("[start_recording] Tee element not found");
+                return Err(RecordError::StreamError("Tee element not found".into()));
+            }
+        };
 
         // Generate file path
         let mut path = PathBuf::from(&self.config.recording_directory);
@@ -289,238 +389,116 @@ impl StreamManager {
 
         info!("Creating recording pipeline for file: {}", location);
 
-        // Create recording Bin: queue -> h264parse -> mp4mux -> filesink
-        let rec_bin = {
-            let queue = ElementFactory::make("queue").build()?;
-            let parse = ElementFactory::make("h264parse")
-                .property("config-interval", &-1i32)
-                .build()?;
-            let mux = ElementFactory::make("mp4mux").property("streamable", &true).build()?;
-            let sink = ElementFactory::make("filesink").property("location", location).property("async", &false).build()?;
+        // Create recording Bin
+        info!("[recording {}] Creating recording pipeline elements", recording_id);
+        let queue = ElementFactory::make("queue").name(&format!("rec_queue_{}", recording_id))
+            .property("max-size-buffers", &1000u32)  // バッファサイズを増加
+            .property("max-size-bytes", &10485760u32)  // 10MB
+            .property("max-size-time", &5000000000u64)  // 5秒
+            .property_from_str("leaky", "downstream")
+            .property("silent", &false)  // デバッグ情報を有効化
+            .build()?;
+        info!("[recording {}] Created queue element: name={}", recording_id, queue.name());
 
-            // PadProbe: parse, mux, sink
-            let rec_id_probe_parse = recording_id.clone();
-            if let Some(parse_sink_pad) = parse.static_pad("sink") {
-                parse_sink_pad.add_probe(PadProbeType::BUFFER, move |_, _| {
-                    tracing::info!("[recording {}] [rec_bin] h264parse.sink BUFFER probe: buffer arrived", rec_id_probe_parse);
-                    PadProbeReturn::Ok
-                });
-            }
-            let mux_video_0_pad = mux.request_pad_simple("video_0");
-            let rec_id_probe_mux = recording_id.clone();
-            if let Some(ref mux_sink_pad) = mux_video_0_pad {
-                mux_sink_pad.add_probe(PadProbeType::BUFFER, move |_, _| {
-                    tracing::info!("[recording {}] [rec_bin] mp4mux.video_0 BUFFER probe: buffer arrived", rec_id_probe_mux);
-                    PadProbeReturn::Ok
-                });
-            } else {
-                tracing::warn!("[record bin] mp4mux video_0 pad not found at probe setup");
-            }
-            if let Some(filesink_sink_pad) = sink.static_pad("sink") {
-                filesink_sink_pad.add_probe(PadProbeType::BUFFER, |_, _| {
-                    tracing::info!("[record bin] filesink sink pad: buffer arrived");
-                    PadProbeReturn::Ok
-                });
-            } else {
-                tracing::warn!("[record bin] filesink sink pad not found at probe setup");
-            }
+        let parse = ElementFactory::make("h264parse").name(&format!("rec_h264parse_{}", recording_id))
+            .property("config-interval", &-1i32)
+            .property("disable-passthrough", &true)
+            .build()?;
+        info!("[recording {}] Created h264parse element: name={}", recording_id, parse.name());
 
-            let bin = Bin::with_name(&format!("rec-bin-{}", recording_id));
-            let add_result = bin.add_many(&[&queue, &parse, &mux, &sink]);
-            tracing::info!("[recording {}] bin.add_many result: {:?}", recording_id, add_result);
+        let mux = ElementFactory::make("mp4mux").name(&format!("rec_mp4mux_{}", recording_id))
+            .property("faststart", &true)
+            .property("reserved-moov-update-period", &10000000000u64)  // 10秒
+            .build()?;
+        info!("[recording {}] Created mp4mux element: name={}", recording_id, mux.name());
 
-            // ghost pad生成
-            let queue_sink_pad = match queue.static_pad("sink") {
-                Some(pad) => pad,
-                None => {
-                    tracing::warn!("[recording {}] queue.sink pad not found at ghost pad setup", recording_id);
-                    return Err(RecordError::StreamError("queue.sink pad not found".to_string()));
-                }
-            };
-            let ghost_pad = match GhostPad::with_target(&queue_sink_pad) {
-                Ok(pad) => pad,
-                Err(e) => {
-                    tracing::warn!("[recording {}] ghost pad creation failed: {}", recording_id, e);
-                    return Err(RecordError::StreamError("ghost pad creation failed".to_string()));
-                }
-            };
-            let _ = ghost_pad.set_active(true);
-            let add_pad_res = bin.add_pad(&ghost_pad);
-            tracing::info!("[recording {}] [after bin.add_pad] ghost_pad: is_active={}, is_linked={}, target={:?}, direction={:?}, add_pad_res={:?}, caps={:?}, peer={:?}",
-                recording_id,
-                ghost_pad.is_active(),
-                ghost_pad.is_linked(),
-                ghost_pad.target().map(|p| p.name()),
-                ghost_pad.direction(),
-                add_pad_res,
-                ghost_pad.current_caps(),
-                ghost_pad.peer().map(|p| p.name())
-            );
+        let sink = ElementFactory::make("filesink").name(&format!("rec_filesink_{}", recording_id))
+            .property("location", &location)
+            .property("sync", &false)
+            .property("async", &false)
+            .build()?;
+        info!("[recording {}] Created filesink element: name={}", recording_id, sink.name());
 
-            // 直列リンク
-            let link_result = Element::link_many(&[&queue, &parse, &mux, &sink]);
-            tracing::info!("[recording {}] Element::link_many result: {:?}", recording_id, link_result);
+        // Create recording Bin
+        let bin = Bin::new();
+        bin.set_property("name", &format!("rec-bin-{}", recording_id));
+        info!("[recording {}] Created recording bin: name={}", recording_id, bin.name());
 
-            // dotファイル出力
-            let dot_path = format!("/tmp/rec_bin_{}.dot", recording_id);
-            bin.debug_to_dot_file(gstreamer::DebugGraphDetails::all(), &dot_path);
-            if !std::path::Path::new(&dot_path).exists() {
-                tracing::error!("[recording {}] rec_bin dot file not found after debug_to_dot_file: {}", recording_id, dot_path);
-            } else {
-                tracing::info!("[recording {}] rec_bin dot file written: {}", recording_id, dot_path);
-            }
-            bin
-        };
+        // Add elements to bin
+        bin.add_many(&[&queue, &parse, &mux, &sink])?;
+        info!("[recording {}] Added elements to recording bin", recording_id);
+
+        // Link elements
+        Element::link_many(&[&queue, &parse, &mux, &sink])?;
+        info!("[recording {}] Linked elements in recording bin", recording_id);
+
+        // Create ghost pad
+        let queue_sink_pad = queue.static_pad("sink").expect("Failed to get queue sink pad");
+        let ghost_pad = GhostPad::with_target(&queue_sink_pad).expect("Failed to create ghost pad");
+        ghost_pad.set_active(true).expect("Failed to activate ghost pad");
+        bin.add_pad(&ghost_pad)?;
+        info!("[recording {}] Added ghost pad to recording bin: name={}, is_active={}, is_linked={}, caps={:?}",
+            recording_id,
+            ghost_pad.name(),
+            ghost_pad.is_active(),
+            ghost_pad.is_linked(),
+            ghost_pad.current_caps()
+        );
+
+        // Add buffer probes to all pads
+        let rec_id_probe = recording_id.clone();
+        if let Some(queue_sink_pad) = queue.static_pad("sink") {
+            queue_sink_pad.add_probe(PadProbeType::BUFFER, move |_, _| {
+                tracing::info!("[recording {}] [rec_bin] queue.sink BUFFER probe: buffer arrived", rec_id_probe);
+                PadProbeReturn::Ok
+            });
+            info!("[recording {}] Added buffer probe to queue.sink pad", recording_id);
+        }
 
         // Add recording Bin to the pipeline
-        pipeline.add(&rec_bin)?;
-        tracing::info!("[recording {}] rec_bin added to pipeline", recording_id);
-        // pipeline.add直後のghost pad/queue.sink pad/rec_bin.sink padの状態
-        if let Some(gp) = rec_bin.static_pad("sink") {
-            tracing::info!("[recording {}] [after pipeline.add] rec_bin.sink ghost_pad: is_active={}, is_linked={}, direction={:?}, caps={:?}, peer={:?}",
-                recording_id,
-                gp.is_active(),
-                gp.is_linked(),
-                gp.direction(),
-                gp.current_caps(),
-                gp.peer().map(|p| p.name())
-            );
-        }
-        if let Some(qsp) = rec_bin.by_name("queue").and_then(|e| e.static_pad("sink")) {
-            tracing::info!("[recording {}] [after pipeline.add] queue.sink: is_active={}, is_linked={}, caps={:?}, peer={:?}",
-                recording_id,
-                qsp.is_active(),
-                qsp.is_linked(),
-                qsp.current_caps(),
-                qsp.peer().map(|p| p.name())
-            );
-        }
+        pipeline.add(&bin)?;
+        info!("[recording {}] Added recording bin to pipeline", recording_id);
+
         // Link the request pad of tee to the sink of the recording bin
-        let tee_src_pad = match tee.request_pad_simple("src_%u") {
-            Some(pad) => pad,
-            None => {
-                tracing::warn!("[recording {}] tee src pad request failed", recording_id);
-                return Err(RecordError::StreamError("tee src pad request failed".to_string()));
+        let tee_src_pad = tee.request_pad_simple("src_%u").ok_or_else(|| {
+            error!("Failed to request tee src pad");
+            RecordError::StreamError("Failed to request tee src pad".into())
+        })?;
+
+        let recording_bin_sink_pad = bin.static_pad("sink").ok_or_else(|| {
+            error!("Failed to get recording bin sink pad");
+            RecordError::StreamError("Failed to get recording bin sink pad".into())
+        })?;
+
+        match tee_src_pad.link(&recording_bin_sink_pad) {
+            Ok(_) => {
+                info!("Successfully linked tee src pad to recording bin sink pad");
             }
-        };
-        // 追加: tee_src_padのpad mode/capsをtracing出力
-        let tee_mode = tee_src_pad.mode();
-        let tee_caps = tee_src_pad.current_caps();
-        tracing::info!("[recording {}] tee_src_pad: mode={:?}, caps={:?}", recording_id, tee_mode, tee_caps);
-        // 追加: tee_src_padにPadProbeType::BUFFERでprobe
-        let recording_id_clone_probe = recording_id.clone();
-        tee_src_pad.add_probe(PadProbeType::BUFFER, move |_, _| {
-            tracing::info!("[recording {}] tee_src_pad BUFFER probe: buffer arrived", recording_id_clone_probe);
-            PadProbeReturn::Ok
-        });
-        // 追加: tee_src_pad/rec_bin_sink_padのactivation mode, capsをtracing出力
-        let tee_src_pad_mode = tee_src_pad.mode();
-        tracing::info!("[recording {}] tee_src_pad: mode={:?}, caps={:?}", recording_id, tee_src_pad_mode, tee_src_pad.current_caps());
-        let rec_bin_sink_pad = match rec_bin.static_pad("sink") {
-            Some(pad) => pad,
-            None => {
-                tracing::warn!("[recording {}] rec_bin sink pad not found after add", recording_id);
-                return Err(RecordError::StreamError("rec_bin sink pad not found".to_string()));
+            Err(e) => {
+                error!("Failed to link pads: {}", e);
+                return Err(RecordError::StreamError(format!("Failed to link pads: {}", e)));
             }
-        };
-        // 追加: rec_bin_sink_padのpad mode/capsをtracing出力
-        let rec_bin_mode = rec_bin_sink_pad.mode();
-        let rec_bin_caps = rec_bin_sink_pad.current_caps();
-        tracing::info!("[recording {}] rec_bin_sink_pad: mode={:?}, caps={:?}", recording_id, rec_bin_mode, rec_bin_caps);
-        tracing::info!("[recording {}] tee_src_pad: name={}, is_linked={}", recording_id, tee_src_pad.name(), tee_src_pad.is_linked());
-        tracing::info!("[recording {}] rec_bin_sink_pad: name={}, is_linked={}", recording_id, rec_bin_sink_pad.name(), rec_bin_sink_pad.is_linked());
-        let link_res = tee_src_pad.link(&rec_bin_sink_pad);
-        tracing::info!("[recording {}] tee_src_pad.link(rec_bin_sink_pad) result: {:?}", recording_id, link_res);
-        // link直後のghost pad/queue.sink pad/rec_bin.sink padの状態
-        tracing::info!("[recording {}] [after tee_src_pad.link] rec_bin.sink ghost_pad: is_active={}, is_linked={}, direction={:?}, caps={:?}, peer={:?}",
-            recording_id,
-            rec_bin_sink_pad.is_active(),
-            rec_bin_sink_pad.is_linked(),
-            rec_bin_sink_pad.direction(),
-            rec_bin_sink_pad.current_caps(),
-            rec_bin_sink_pad.peer().map(|p| p.name())
-        );
-        if let Some(qsp) = rec_bin.by_name("queue").and_then(|e| e.static_pad("sink")) {
-            tracing::info!("[recording {}] [after tee_src_pad.link] queue.sink: is_active={}, is_linked={}, caps={:?}, peer={:?}",
-                recording_id,
-                qsp.is_active(),
-                qsp.is_linked(),
-                qsp.current_caps(),
-                qsp.peer().map(|p| p.name())
-            );
         }
-        // 追加: rec_bin_sink_padの詳細状態
-        tracing::info!(
-            "[recording {}] rec_bin_sink_pad after link: name={}, is_linked={}, is_active={}, peer={:?}, caps={:?}, direction={:?}",
-            recording_id,
-            rec_bin_sink_pad.name(),
-            rec_bin_sink_pad.is_linked(),
-            rec_bin_sink_pad.is_active(),
-            rec_bin_sink_pad.peer().map(|p| p.name().to_string()),
-            rec_bin_sink_pad.current_caps().map(|c| c.to_string()),
-            rec_bin_sink_pad.direction()
-        );
-        // tee→rec_binリンク直後のpad状態を詳細出力
-        tracing::info!("[recording {}] [after link] tee_src_pad: is_linked={}, caps={:?}, peer={:?}",
-            recording_id,
-            tee_src_pad.is_linked(),
-            tee_src_pad.current_caps(),
-            tee_src_pad.peer().map(|p| p.name())
-        );
-        tracing::info!("[recording {}] [after link] rec_bin_sink_pad: is_linked={}, is_active={}, caps={:?}, peer={:?}",
-            recording_id,
-            rec_bin_sink_pad.is_linked(),
-            rec_bin_sink_pad.is_active(),
-            rec_bin_sink_pad.current_caps(),
-            rec_bin_sink_pad.peer().map(|p| p.name())
-        );
-        if link_res.is_err() {
-            error!("Failed to link tee to recording bin: {:?}", link_res);
-            return Err(RecordError::StreamError(format!("Failed to link tee to recording bin: {:?}", link_res)));
-        }
+
         // Record the pad (for use when stopping)
-        self.recording_pads.lock().await.insert(recording_id, tee_src_pad);
+        self.recording_pads.lock().await.insert(recording_id, tee_src_pad.clone());
+        info!("[recording {}] Recorded tee src pad for later use", recording_id);
+        
         // Sync the state of the recording Bin with the parent pipeline
-        let sync_res = rec_bin.sync_state_with_parent();
-        tracing::info!("[recording {}] rec_bin.sync_state_with_parent() result: {:?}", recording_id, sync_res);
-        // sync_state_with_parent直後のghost pad/queue.sink pad/rec_bin.sink padの状態
-        tracing::info!("[recording {}] [after sync_state_with_parent] rec_bin.sink ghost_pad: is_active={}, is_linked={}, direction={:?}, caps={:?}, peer={:?}",
+        let sync_res = bin.sync_state_with_parent();
+        info!("[recording {}] rec_bin.sync_state_with_parent result: {:?}", recording_id, sync_res);
+        
+        // 録画パイプラインの状態をPLAYINGに設定
+        let state_change = bin.set_state(State::Playing);
+        info!(
+            "[recording {}] Setting recording bin state to PLAYING: {:?}",
             recording_id,
-            rec_bin_sink_pad.is_active(),
-            rec_bin_sink_pad.is_linked(),
-            rec_bin_sink_pad.direction(),
-            rec_bin_sink_pad.current_caps(),
-            rec_bin_sink_pad.peer().map(|p| p.name())
+            state_change
         );
-        if let Some(qsp) = rec_bin.by_name("queue").and_then(|e| e.static_pad("sink")) {
-            tracing::info!("[recording {}] [after sync_state_with_parent] queue.sink: is_active={}, is_linked={}, caps={:?}, peer={:?}",
-                recording_id,
-                qsp.is_active(),
-                qsp.is_linked(),
-                qsp.current_caps(),
-                qsp.peer().map(|p| p.name())
-            );
-        }
-        // dotファイル出力（状態遷移後に実施）
-        let dot_path = format!("/tmp/rec_bin_{}.dot", recording_id);
-        rec_bin.debug_to_dot_file(gstreamer::DebugGraphDetails::all(), &dot_path);
-        if !std::path::Path::new(&dot_path).exists() {
-            tracing::error!("[recording {}] rec_bin dot file not found after debug_to_dot_file: {}", recording_id, dot_path);
-        } else {
-            tracing::info!("[recording {}] rec_bin dot file written: {}", recording_id, dot_path);
-        }
-        // pipeline全体のdotファイルも出力
-        let pipeline_dot_path = format!("/tmp/pipeline_{}.dot", recording_id);
-        pipeline.debug_to_dot_file(gstreamer::DebugGraphDetails::all(), &pipeline_dot_path);
-        if !std::path::Path::new(&pipeline_dot_path).exists() {
-            tracing::error!("[recording {}] pipeline dot file not found after debug_to_dot_file: {}", recording_id, pipeline_dot_path);
-        } else {
-            tracing::info!("[recording {}] pipeline dot file written: {}", recording_id, pipeline_dot_path);
-        }
 
         state.is_recording = true;
         state.current_recording_id = Some(recording_id);
-        info!("Successfully started recording with ID: {}", recording_id);
+        info!("[recording {}] Successfully started recording", recording_id);
         Ok(())
     }
 
@@ -556,14 +534,7 @@ impl StreamManager {
             }
         };
 
-        let _tee_src_pad = match self.recording_pads.lock().await.remove(&recording_id) {
-            Some(pad) => pad,
-            None => {
-                tracing::warn!("tee_src_pad not found for recording_id={}", recording_id);
-                return Err(RecordError::StreamError("tee_src_pad not found".to_string()));
-            }
-        };
-
+        // EOSイベントの処理を改善
         let sink_pad = match rec_bin.static_pad("sink") {
             Some(pad) => pad,
             None => {
@@ -571,6 +542,7 @@ impl StreamManager {
                 return Err(RecordError::StreamError("rec_bin sink pad not found in stop_recording".to_string()));
             }
         };
+        
         let tee_peer_pad = match sink_pad.peer() {
             Some(pad) => pad,
             None => {
@@ -579,16 +551,23 @@ impl StreamManager {
             }
         };
 
-        tee_peer_pad.add_probe(PadProbeType::BLOCK_DOWNSTREAM, move |pad, _| {
-            pad.send_event(event::Eos::new());
-            PadProbeReturn::Remove
-        });
-        
-        // This part needs to be synchronous to ensure the file is written
-        std::thread::sleep(std::time::Duration::from_millis(500)); 
+        // EOSイベントの送信を改善
+        let eos_event = event::Eos::new();
+        if !tee_peer_pad.send_event(eos_event) {
+            tracing::warn!("Failed to send EOS event to tee peer pad");
+        }
 
+        // バッファが完全に処理されるまで待機
+        std::thread::sleep(std::time::Duration::from_millis(5000));  // 5秒待機
+
+        // パイプラインからrec_binを削除
         pipeline.remove(&rec_bin)?;
+        
+        // rec_binの状態をNULLに設定
         rec_bin.set_state(State::Null)?;
+
+        // ファイルが完全に書き込まれるまで追加で待機
+        std::thread::sleep(std::time::Duration::from_millis(2000));  // 2秒待機
 
         info!(%recording_id, "Recording bin removed and file saved.");
         state.is_recording = false;
@@ -622,6 +601,7 @@ impl StreamManager {
         *state = StreamState::default();
         *self.tee.lock().await = None;
 
+        info!("Disconnected from stream and stopped pipeline.");
         Ok(())
     }
 }
