@@ -20,7 +20,17 @@ cd EgocentricVision
 
 2. Start the services:
 ```bash
-docker compose up -d
+docker compose up --build -d
+```
+終了
+```bash
+# ボリュームも削除する場合
+docker compose down -v
+```
+
+```bash
+# 停止して再起動する場合
+docker compose down -v && docker compose up --build -d
 ```
 
 This will start:

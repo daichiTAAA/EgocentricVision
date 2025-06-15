@@ -1,19 +1,13 @@
 import React from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
 import { CssBaseline } from '@mui/material';
 import { QueryProvider } from '@/providers/QueryProvider';
 import { NotificationContainer } from '@/components/common/NotificationContainer';
-import { LoginPage, DashboardPage, RecordingsPage } from '@/pages';
-import { useAuthStore, useUIStore } from '@/store';
-
-const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { isAuthenticated } = useAuthStore();
-  return isAuthenticated ? <>{children}</> : <Navigate to="/login" replace />;
-};
+import { DashboardPage, RecordingsPage } from '@/pages';
+import { useUIStore } from '@/store';
 
 export const App: React.FC = () => {
-  const { isAuthenticated } = useAuthStore();
   const { theme } = useUIStore();
 
   const muiTheme = createTheme({
@@ -31,27 +25,9 @@ export const App: React.FC = () => {
       <QueryProvider>
         <Router>
           <Routes>
-            <Route
-              path="/login"
-              element={isAuthenticated ? <Navigate to="/" replace /> : <LoginPage />}
-            />
-            <Route
-              path="/"
-              element={
-                <ProtectedRoute>
-                  <DashboardPage />
-                </ProtectedRoute>
-              }
-            />
-            <Route
-              path="/recordings"
-              element={
-                <ProtectedRoute>
-                  <RecordingsPage />
-                </ProtectedRoute>
-              }
-            />
-            <Route path="*" element={<Navigate to="/" replace />} />
+            <Route path="/" element={<DashboardPage />} />
+            <Route path="/recordings" element={<RecordingsPage />} />
+            <Route path="*" element={<DashboardPage />} />
           </Routes>
         </Router>
         <NotificationContainer />

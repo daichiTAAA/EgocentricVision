@@ -1,4 +1,4 @@
-import { apiClient } from '@/lib/axios';
+import apiClient from '@/lib/axios';
 import type { Recording, RecordingStartRequest } from '@/types/api';
 
 export const recordingsApi = {
