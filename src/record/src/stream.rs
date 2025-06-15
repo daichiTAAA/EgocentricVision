@@ -1027,46 +1027,78 @@ impl StreamManager {
             RecordError::StreamError("Pipeline is not initialized".into())
         })?;
 
-        // EOSイベントの処理を改善
-        let sink_pad = match pipeline.by_name(&format!("rec-bin-{}", recording_id)) {
-            Some(bin) => bin.static_pad("sink").ok_or_else(|| {
-                error!("[recording {}] rec_bin sink pad not found in stop_recording for recording_id={}", recording_id, recording_id);
-                RecordError::StreamError("rec_bin sink pad not found in stop_recording".to_string())
-            })?,
-            None => {
-                tracing::warn!("rec_bin not found in pipeline for recording_id={}", recording_id);
-                return Err(RecordError::StreamError("rec_bin not found in pipeline".to_string()));
-            }
-        };
-        
-        let tee_peer_pad = match sink_pad.peer() {
-            Some(pad) => pad,
-            None => {
-                tracing::warn!("sink_pad.peer() not found in stop_recording for recording_id={}", recording_id);
-                return Err(RecordError::StreamError("sink_pad.peer() not found in stop_recording".to_string()));
-            }
-        };
-
-        // EOSイベントの送信を改善
-        let eos_event = event::Eos::new();
-        if !tee_peer_pad.send_event(eos_event) {
-            tracing::warn!("Failed to send EOS event to tee peer pad");
-        }
-
-        // バッファが完全に処理されるまで待機
-        std::thread::sleep(std::time::Duration::from_millis(5000));  // 5秒待機
-
-        // パイプラインからrec_binを削除
+        // 録画Binを取得
         let bin_name = format!("rec-bin-{}", recording_id);
-        if let Some(bin) = pipeline.by_name(&bin_name) {
-            pipeline.remove(&bin)?;
-        }
-        
-        // rec_binの状態をNULLに設定
-        pipeline.set_state(State::Null)?;
+        let rec_bin = pipeline.by_name(&bin_name).ok_or_else(|| {
+            error!("[recording {}] Recording bin not found", recording_id);
+            RecordError::StreamError(format!("Recording bin '{}' not found", bin_name))
+        })?;
 
-        // ファイルが完全に書き込まれるまで追加で待機
-        std::thread::sleep(std::time::Duration::from_millis(2000));  // 2秒待機
+        // teeと録画Binのリンクを解除
+        let mut recording_pads = self.recording_pads.lock().await;
+        let tee_src_pad = recording_pads.remove(&recording_id).ok_or_else(|| {
+            error!("[recording {}] Tee source pad not found", recording_id);
+            RecordError::StreamError("Tee source pad not found".to_string())
+        })?;
+
+        let rec_bin_sink_pad = rec_bin.static_pad("sink").ok_or_else(|| {
+            error!("[recording {}] Recording bin sink pad not found", recording_id);
+            RecordError::StreamError("Recording bin sink pad not found".to_string())
+        })?;
+
+        info!("[recording {}] Unlinking tee from recording bin...", recording_id);
+        tee_src_pad.unlink(&rec_bin_sink_pad)?;
+
+        // 録画BinにEOSイベントを送信
+        info!("[recording {}] Sending EOS to recording bin sink pad...", recording_id);
+        rec_bin_sink_pad.send_event(gstreamer::event::Eos::new());
+
+        // バスでEOSメッセージを待機
+        let bus = pipeline.bus().ok_or_else(|| {
+            error!("[recording {}] Failed to get bus from pipeline", recording_id);
+            RecordError::StreamError("Failed to get bus from pipeline".into())
+        })?;
+
+        let timeout = gstreamer::ClockTime::from_seconds(10); // 10秒のタイムアウト
+        let eos_received = bus.timed_pop_filtered(
+            Some(timeout),
+            &[gstreamer::MessageType::Eos, gstreamer::MessageType::Error],
+        );
+
+        match eos_received {
+            Some(msg) => {
+                match msg.view() {
+                    MessageView::Eos(_) => {
+                        info!("[recording {}] EOS received from recording bin", recording_id);
+                    }
+                    MessageView::Error(err) => {
+                        error!("[recording {}] Error during recording shutdown: {}", recording_id, err.error());
+                        if let Some(debug) = err.debug() {
+                            error!("[recording {}] Debug info: {:?}", recording_id, debug(&err));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None => {
+                warn!("[recording {}] Timeout waiting for EOS from recording bin", recording_id);
+            }
+        }
+
+        // 録画Binの状態をNULLに設定
+        info!("[recording {}] Setting recording bin state to NULL...", recording_id);
+        rec_bin.set_state(gstreamer::State::Null)?;
+
+        // パイプラインから録画Binを削除
+        info!("[recording {}] Removing recording bin from pipeline...", recording_id);
+        pipeline.remove(&rec_bin)?;
+
+        // teeから使わなくなったパッドを解放
+        tee_src_pad.parent().and_then(|tee| {
+            tee.downcast_ref::<gstreamer::Element>().map(|tee| {
+                tee.release_request_pad(&tee_src_pad);
+            })
+        });
 
         info!(%recording_id, "Recording bin removed and file saved.");
         state.is_recording = false;

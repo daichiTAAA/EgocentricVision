@@ -54,3 +54,29 @@ curl http://localhost:3000/api/v1/recordings/{id}/download
 curl -X DELETE http://localhost:3000/api/v1/recordings/{id}
 ```
 
+### Recording File Validation
+```bash
+# Download Recording
+curl -o test_recording.mp4 http://localhost:3000/api/v1/recordings/{id}/download
+
+# Check Recording File Details
+ffprobe -v error -show_entries format=duration,size -show_streams test_recording.mp4
+
+# Expected Output Example:
+# [STREAM]
+# index=0
+# codec_name=h264
+# codec_type=video
+# width=1280
+# height=720
+# r_frame_rate=15/1
+# duration=12.722000
+# [FORMAT]
+# duration=12.722000
+# size=8019990
+# [/FORMAT]
+
+# Note: Recording duration should be at least 10 seconds to ensure proper file generation
+# and moov atom writing. Short recordings (less than 5 seconds) may result in invalid files.
+```
+
