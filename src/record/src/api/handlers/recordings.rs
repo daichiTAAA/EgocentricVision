@@ -16,57 +16,45 @@ use crate::error::RecordError;
 use crate::models::{
     StartRecordingResponse, StopRecordingResponse, RecordingListItem, RecordingDetails,
 };
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use axum::response::IntoResponse;
 
 pub async fn start(
     State(app_state): State<Arc<AppState>>,
 ) -> Result<Json<StartRecordingResponse>, RecordError> {
-    info!("Received recording start request");
+    info!("Starting recording...");
+    let recording_id = Uuid::new_v4().to_string();
+    info!("[recording {}] Generated recording ID", recording_id);
 
-    // Check if stream is connected
-    if !app_state.stream_manager.is_connected().await {
-        error!("Failed to start recording: Stream is not connected");
-        return Err(RecordError::NotConnected);
+    let location = format!("/var/data/recordings/{}.mp4", recording_id);
+    info!("[recording {}] Recording file location: {}", recording_id, location);
+
+    let recording_id2 = recording_id.clone();
+    let location2 = location.clone();
+    let app_state2 = app_state.clone();
+    let result = tokio::task::spawn_blocking(AssertUnwindSafe(move || {
+        futures::executor::block_on(app_state2.stream_manager.start_recording(&recording_id2, &location2))
+    })).await;
+
+    match result {
+        Ok(Ok(_)) => {
+            info!("[recording {}] Successfully started recording", recording_id);
+            Ok(Json(StartRecordingResponse {
+                recording_id,
+                location,
+                message: "Recording started successfully".to_string(),
+                status: "RECORDING".to_string(),
+            }))
+        },
+        Ok(Err(e)) => {
+            error!("[recording {}] Failed to start recording: {}", recording_id, e);
+            Err(e)
+        },
+        Err(e) => {
+            error!("[recording {}] Panic occurred in start_recording: {:?}", recording_id, e);
+            Err(RecordError::StreamError(format!("Panic occurred in start_recording: {:?}", e)))
+        }
     }
-
-    // Check if already recording
-    if app_state.stream_manager.is_recording().await {
-        error!("Failed to start recording: Already recording");
-        return Err(RecordError::AlreadyRecording);
-    }
-
-    let recording_id = Uuid::new_v4();
-    let start_time = Utc::now();
-    let file_name = format!("rec_{}.mp4", start_time.format("%Y%m%d_%H%M%S"));
-    let file_path = app_state.config.recording_directory.join(&file_name);
-
-    info!("Creating recording entry in database: id={}, file={}", recording_id, file_path.display());
-
-    // Create recording entry in database
-    let _recording = app_state.database.create_recording(
-        recording_id,
-        file_name,
-        file_path.to_string_lossy().to_string(),
-        start_time,
-    ).await.map_err(|e| {
-        error!("Failed to create recording entry in database: {}", e);
-        e
-    })?;
-
-    info!("Starting recording in stream manager: id={}", recording_id);
-
-    // Start recording in stream manager
-    app_state.stream_manager.start_recording(recording_id).await.map_err(|e| {
-        error!("Failed to start recording in stream manager: {} (recording_id={})", e, recording_id);
-        e
-    })?;
-
-    info!("Successfully started recording with ID: {}", recording_id);
-
-    Ok(Json(StartRecordingResponse {
-        recording_id,
-        status: "RECORDING_STARTED".to_string(),
-        message: "Recording has been initiated.".to_string(),
-    }))
 }
 
 pub async fn stop(
@@ -85,7 +73,8 @@ pub async fn stop(
     info!("Getting recording details from database: id={}", recording_id);
     
     // Get the recording to calculate duration and file size
-    let recording = app_state.database.get_recording(recording_id).await.map_err(|e| {
+    let uuid1 = Uuid::parse_str(&recording_id).map_err(|e| RecordError::StreamError(e.to_string()))?;
+    let recording = app_state.database.get_recording(uuid1).await.map_err(|e| {
         error!("Failed to get recording details from database: {}", e);
         e
     })?;
@@ -108,8 +97,9 @@ pub async fn stop(
     info!("Updating recording as completed: id={}, duration={}s, size={} bytes", recording_id, duration, file_size);
 
     // Update recording as completed
+    let uuid2 = Uuid::parse_str(&recording_id).map_err(|e| RecordError::StreamError(e.to_string()))?;
     let _updated_recording = app_state.database.update_recording_completed(
-        recording_id,
+        uuid2,
         end_time,
         duration,
         file_size,

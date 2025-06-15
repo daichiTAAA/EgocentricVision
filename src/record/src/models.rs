@@ -54,14 +54,15 @@ pub struct DisconnectResponse {
 
 #[derive(Debug, Serialize)]
 pub struct StartRecordingResponse {
-    pub recording_id: Uuid,
-    pub status: String,
+    pub recording_id: String,
+    pub location: String,
     pub message: String,
+    pub status: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct StopRecordingResponse {
-    pub recording_id: Uuid,
+    pub recording_id: String,
     pub status: String,
     pub message: String,
 }

@@ -1,6 +1,8 @@
 use crate::config::Config;
 use crate::database::Database;
-use crate::stream::StreamManager;
+use crate::stream::{StreamManager, StreamState};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 pub struct AppState {
     pub config: Config,

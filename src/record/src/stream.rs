@@ -21,6 +21,8 @@ use tokio::sync::mpsc;
 use std::time::Duration;
 use tokio::time::sleep;
 use glib::ControlFlow;
+use glib::LogLevel;
+use gstreamer::DebugLevel;
 
 /// Stores the logical state of the stream.
 #[derive(Debug, Clone, Default)]
@@ -29,17 +31,260 @@ pub struct StreamState {
     pub is_recording: bool,
     pub protocol: Option<String>,
     pub url: Option<String>,
-    pub current_recording_id: Option<Uuid>,
+    pub current_recording_id: Option<String>,
     pub is_tee_ready: bool,
+    pub pipeline: Option<Pipeline>,
+    pub tee: Option<Element>,
+}
+
+impl StreamState {
+    pub fn new() -> Self {
+        Self {
+            is_connected: false,
+            is_recording: false,
+            protocol: None,
+            url: None,
+            current_recording_id: None,
+            is_tee_ready: false,
+            pipeline: None,
+            tee: None,
+        }
+    }
+
+    pub async fn start_recording(&mut self, recording_id: &str, location: &str) -> Result<(), RecordError> {
+        if !self.is_connected {
+            return Err(RecordError::StreamError("Stream not connected".to_string()));
+        }
+
+        if self.is_recording {
+            return Err(RecordError::StreamError("Already recording".to_string()));
+        }
+
+        let pipeline = self.pipeline.as_ref().ok_or_else(|| {
+            error!("Pipeline not initialized");
+            RecordError::StreamError("Pipeline not initialized".to_string())
+        })?;
+
+        let tee = self.tee.as_ref().ok_or_else(|| {
+            error!("Tee element not initialized");
+            RecordError::StreamError("Tee element not initialized".to_string())
+        })?;
+
+        // Create recording bin
+        let rec_bin = gstreamer::Bin::new();
+        rec_bin.set_property("name", &format!("rec-bin-{}", recording_id));
+        
+        // Create elements
+        let queue = gstreamer::ElementFactory::make("queue")
+            .name("queue")
+            .build()
+            .map_err(|e| {
+                error!("Failed to create queue element: {}", e);
+                RecordError::StreamError(format!("Failed to create queue element: {}", e))
+            })?;
+
+        let h264parse = gstreamer::ElementFactory::make("h264parse")
+            .name("h264parse")
+            .property("config-interval", -1)  // すべてのSPS/PPSを保持
+            .property("disable-passthrough", true)  // パススルーを無効化
+            .build()
+            .map_err(|e| {
+                error!("Failed to create h264parse element: {}", e);
+                RecordError::StreamError(format!("Failed to create h264parse element: {}", e))
+            })?;
+
+        let mp4mux = gstreamer::ElementFactory::make("mp4mux")
+            .name("mp4mux")
+            .property("reserved-moov-update-period", 1u64)  // より頻繁なmoov更新
+            .property("fragment-duration", 0)  // フラグメント化を無効化
+            .build()
+            .map_err(|e| {
+                error!("Failed to create mp4mux element: {}", e);
+                RecordError::StreamError(format!("Failed to create mp4mux element: {}", e))
+            })?;
+
+        let filesink = gstreamer::ElementFactory::make("filesink")
+            .name("filesink")
+            .property("location", location)
+            .build()
+            .map_err(|e| {
+                error!("Failed to create filesink element: {}", e);
+                RecordError::StreamError(format!("Failed to create filesink element: {}", e))
+            })?;
+
+        // Add elements to bin
+        rec_bin.add_many(&[&queue, &h264parse, &mp4mux, &filesink])
+            .map_err(|e| {
+                error!("Failed to add elements to recording bin: {}", e);
+                RecordError::StreamError(format!("Failed to add elements to recording bin: {}", e))
+            })?;
+
+        // Link elements
+        queue.link(&h264parse)
+            .map_err(|e| {
+                error!("Failed to link queue to h264parse: {}", e);
+                RecordError::StreamError(format!("Failed to link queue to h264parse: {}", e))
+            })?;
+
+        h264parse.link(&mp4mux)
+            .map_err(|e| {
+                error!("Failed to link h264parse to mp4mux: {}", e);
+                RecordError::StreamError(format!("Failed to link h264parse to mp4mux: {}", e))
+            })?;
+
+        mp4mux.link(&filesink)
+            .map_err(|e| {
+                error!("Failed to link mp4mux to filesink: {}", e);
+                RecordError::StreamError(format!("Failed to link mp4mux to filesink: {}", e))
+            })?;
+
+        // Add buffer probes
+        let rec_id_probe = recording_id.to_string();
+        let rec_id_probe2 = rec_id_probe.clone();
+        if let Some(queue_sink_pad) = queue.static_pad("sink") {
+            queue_sink_pad.add_probe(PadProbeType::BUFFER, move |_, _| {
+                tracing::info!("[recording {}] [rec_bin] queue.sink BUFFER probe: buffer arrived", rec_id_probe);
+                PadProbeReturn::Ok
+            });
+        }
+        if let Some(queue_src_pad) = queue.static_pad("src") {
+            queue_src_pad.add_probe(PadProbeType::BUFFER, move |_, _| {
+                tracing::info!("[recording {}] [rec_bin] queue.src BUFFER probe: buffer arrived", rec_id_probe2);
+                PadProbeReturn::Ok
+            });
+        }
+
+        // Add bus watch for recording bin
+        let rec_id_state = recording_id.to_string();
+        let bus = pipeline.bus().ok_or_else(|| RecordError::StreamError("Failed to get bus from pipeline".into()))?;
+        let bin_clone = rec_bin.clone();
+        let _watch_id = bus.add_watch(move |_, msg| {
+            match msg.view() {
+                MessageView::Error(err) => {
+                    error!("[recording {}] Error from recording bin: {}", rec_id_state, err.error());
+                    if let Some(debug) = err.debug() {
+                        error!("[recording {}] Debug info: {:?}", rec_id_state, debug(&err));
+                    }
+                    // エラーが発生した場合、パイプラインを停止
+                    if let Some(element) = err.src() {
+                        if let Some(pipeline) = element.parent() {
+                            if let Some(pipeline) = pipeline.downcast_ref::<gstreamer::Pipeline>() {
+                                let _ = pipeline.set_state(gstreamer::State::Null);
+                            }
+                        }
+                    }
+                }
+                MessageView::Warning(warn) => {
+                    warn!("[recording {}] Warning from recording bin: {}", rec_id_state, warn.error());
+                    if let Some(debug) = warn.debug() {
+                        warn!("[recording {}] Debug info: {:?}", rec_id_state, debug(&warn));
+                    }
+                }
+                MessageView::Eos(_) => {
+                    info!("[recording {}] End of stream from recording bin", rec_id_state);
+                    // EOSが発生した場合、パイプラインを停止
+                    if let Some(pipeline) = bin_clone.parent() {
+                        if let Some(pipeline) = pipeline.downcast_ref::<gstreamer::Pipeline>() {
+                            let _ = pipeline.set_state(gstreamer::State::Null);
+                        }
+                    }
+                }
+                MessageView::StateChanged(state) => {
+                    let old = state.old();
+                    let new = state.current();
+                    let pending = state.pending();
+                    info!("[recording {}] State changed from {:?} to {:?} (pending: {:?})", rec_id_state, old, new, pending);
+                    if new == gstreamer::State::Playing {
+                        info!("[recording {}] Recording bin is now playing", rec_id_state);
+                    }
+                }
+                MessageView::Buffering(buffering) => {
+                    info!("[recording {}] Buffering: {}%", rec_id_state, buffering.percent());
+                }
+                _ => {}
+            }
+            glib::ControlFlow::Continue
+        }).unwrap();
+
+        // Add recording bin to pipeline
+        pipeline.add(&rec_bin)
+            .map_err(|e| {
+                error!("Failed to add recording bin to pipeline: {}", e);
+                RecordError::StreamError(format!("Failed to add recording bin to pipeline: {}", e))
+            })?;
+
+        // Link tee to recording bin
+        let tee_src_pad = tee.request_pad_simple("src_%u")
+            .ok_or_else(|| {
+                error!("Failed to get tee src pad");
+                RecordError::StreamError("Failed to get tee src pad".to_string())
+            })?;
+
+        let rec_bin_sink_pad = queue.static_pad("sink")
+            .ok_or_else(|| {
+                error!("Failed to get recording bin sink pad");
+                RecordError::StreamError("Failed to get recording bin sink pad".to_string())
+            })?;
+
+        // Check caps compatibility
+        let tee_src_caps = tee_src_pad.current_caps()
+            .ok_or_else(|| {
+                error!("Failed to get tee src pad caps");
+                RecordError::StreamError("Failed to get tee src pad caps".to_string())
+            })?;
+
+        let bin_caps = rec_bin_sink_pad.current_caps().or_else(|| {
+            warn!("[recording {}] recording_bin_sink_pad.current_caps() is None, fallback to query_caps(None)", recording_id);
+            Some(rec_bin_sink_pad.query_caps(None))
+        }).ok_or_else(|| {
+            error!("[recording {}] Failed to get recording bin sink pad caps", recording_id);
+            RecordError::StreamError("Failed to get recording bin sink pad caps".into())
+        })?;
+
+        if !tee_src_caps.can_intersect(&bin_caps) {
+            error!("Caps not compatible between tee src pad and recording bin sink pad");
+            return Err(RecordError::StreamError("Caps not compatible between tee src pad and recording bin sink pad".to_string()));
+        }
+
+        tee_src_pad.link(&rec_bin_sink_pad)
+            .map_err(|e| {
+                error!("Failed to link tee to recording bin: {}", e);
+                RecordError::StreamError(format!("Failed to link tee to recording bin: {}", e))
+            })?;
+
+        // Sync recording bin state with pipeline
+        rec_bin.sync_children_states()
+            .map_err(|e| {
+                error!("Failed to sync recording bin state: {}", e);
+                RecordError::StreamError(format!("Failed to sync recording bin state: {}", e))
+            })?;
+
+        // Set recording bin state to Playing
+        rec_bin.set_state(gstreamer::State::Playing)
+            .map_err(|e| {
+                error!("Failed to set recording bin state to Playing: {}", e);
+                RecordError::StreamError(format!("Failed to set recording bin state to Playing: {}", e))
+            })?;
+
+        // Log state of each element
+        info!("[recording {}] Recording bin state: {:?}", recording_id, rec_bin.current_state());
+        info!("[recording {}] Queue state: {:?}", recording_id, queue.current_state());
+        info!("[recording {}] H264Parse state: {:?}", recording_id, h264parse.current_state());
+        info!("[recording {}] MP4Mux state: {:?}", recording_id, mp4mux.current_state());
+        info!("[recording {}] FileSink state: {:?}", recording_id, filesink.current_state());
+
+        self.is_recording = true;
+        self.current_recording_id = Some(recording_id.to_string());
+
+        Ok(())
+    }
 }
 
 /// Manages the GStreamer pipeline and stream state.
 pub struct StreamManager {
     state: Arc<Mutex<StreamState>>,
-    pipeline: Arc<Mutex<Option<Pipeline>>>,
-    tee: Arc<Mutex<Option<Element>>>,
     config: Config,
-    recording_pads: Arc<Mutex<HashMap<Uuid, gstreamer::Pad>>>,
+    recording_pads: Arc<Mutex<HashMap<String, gstreamer::Pad>>>,
     is_tee_ready: Arc<AtomicBool>,
 }
 
@@ -50,9 +295,7 @@ impl StreamManager {
             panic!("Failed to initialize GStreamer: {}", e);
         }
         Self {
-            state: Arc::new(Mutex::new(StreamState::default())),
-            pipeline: Arc::new(Mutex::new(None)),
-            tee: Arc::new(Mutex::new(None)),
+            state: Arc::new(Mutex::new(StreamState::new())),
             config,
             recording_pads: Arc::new(Mutex::new(HashMap::new())),
             is_tee_ready: Arc::new(AtomicBool::new(false)),
@@ -76,8 +319,8 @@ impl StreamManager {
     /// Returns detailed status of the pipeline and Tee (for debugging)
     pub async fn get_detailed_status(&self) -> String {
         let state = self.state.lock().await;
-        let pipeline_lock = self.pipeline.lock().await;
-        let tee_lock = self.tee.lock().await;
+        let pipeline_lock = self.state.lock().await.pipeline.as_ref().map(|p| p.state(gstreamer::ClockTime::ZERO));
+        let tee_lock = self.state.lock().await.tee.as_ref().map(|t| t.state(gstreamer::ClockTime::ZERO));
         
         let mut status = format!(
             "StreamManager Status:\n  Connected: {}\n  Recording: {}\n  Protocol: {:?}\n  URL: {:?}\n",
@@ -89,15 +332,13 @@ impl StreamManager {
         
         status.push_str(&format!("  Tee Ready: {}\n", self.is_tee_ready.load(Ordering::SeqCst)));
         
-        if let Some(pipeline) = pipeline_lock.as_ref() {
-            let (_, current_state, pending_state) = pipeline.state(gstreamer::ClockTime::ZERO);
+        if let Some((_, current_state, pending_state)) = pipeline_lock {
             status.push_str(&format!("  Pipeline State: {:?} (pending: {:?})\n", current_state, pending_state));
         } else {
             status.push_str("  Pipeline: None\n");
         }
         
-        if let Some(tee) = tee_lock.as_ref() {
-            let (_, current_state, pending_state) = tee.state(gstreamer::ClockTime::ZERO);
+        if let Some((_, current_state, pending_state)) = tee_lock {
             status.push_str(&format!("  Tee State: {:?} (pending: {:?})\n", current_state, pending_state));
         } else {
             status.push_str("  Tee: None\n");
@@ -157,11 +398,11 @@ impl StreamManager {
         let _watch_id = bus.add_watch(move |_, msg| {
             match msg.view() {
                 MessageView::Error(err) => {
-                    error!("Error from {:?}: {}", err.src().map(|s| s.path_string()), err.error());
+                    error!("[BUS ERROR] from {:?}: {}", err.src().map(|s| s.path_string()), err.error());
                     ControlFlow::Break
                 }
                 MessageView::Warning(warn) => {
-                    warn!("Warning from {:?}: {}", warn.src().map(|s| s.path_string()), warn.error());
+                    warn!("[BUS WARNING] from {:?}: {}", warn.src().map(|s| s.path_string()), warn.error());
                     ControlFlow::Continue
                 }
                 MessageView::Eos(_) => {
@@ -197,9 +438,9 @@ impl StreamManager {
         // Create pipeline_weak in advance and move only it to the closure
         let identity_src_clone = identity_src.clone();
         let is_tee_ready_clone = self.is_tee_ready.clone();
+        let state_clone = self.state.clone();
         src.connect_pad_added(move |src_elem, src_pad| {
-            info!("Received new pad '{}' from '{}'", src_pad.name(), src_elem.name());
-            
+            info!("[pad-added] event fired: src_elem={}, src_pad={}", src_elem.name(), src_pad.name());
             // パッドの詳細情報をログ出力
             info!("Pad details:");
             info!("  - Direction: {:?}", src_pad.direction());
@@ -208,7 +449,6 @@ impl StreamManager {
             info!("  - Template: {:?}", src_pad.pad_template());
             info!("  - Parent: {:?}", src_pad.parent().map(|e| e.name()));
             info!("  - Peer: {:?}", src_pad.peer().map(|p| p.name()));
-            
             let new_pad_caps = match src_pad.current_caps() {
                 Some(caps) => {
                     info!("  - Caps structure: {:?}", caps.structure(0));
@@ -219,7 +459,6 @@ impl StreamManager {
                     return;
                 }
             };
-
             let new_pad_struct = match new_pad_caps.structure(0) {
                 Some(s) => {
                     info!("  - Structure name: {}", s.name());
@@ -235,15 +474,17 @@ impl StreamManager {
                     return;
                 }
             };
-
             info!("Checking pad compatibility:");
-            info!("  - Is RTP: {}", new_pad_struct.name().starts_with("application/x-rtp"));
-            info!("  - Is video: {}", new_pad_struct.get::<&str>("media").unwrap_or("") == "video");
-            info!("  - Is H264: {}", new_pad_struct.get::<&str>("encoding-name").unwrap_or("").to_uppercase() == "H264");
-
-            if new_pad_struct.name().starts_with("application/x-rtp") &&
-               new_pad_struct.get::<&str>("media").unwrap_or("") == "video" &&
-               new_pad_struct.get::<&str>("encoding-name").unwrap_or("").to_uppercase() == "H264" {
+            let is_rtp = new_pad_struct.name().starts_with("application/x-rtp");
+            let is_video = new_pad_struct.get::<&str>("media").unwrap_or("") == "video";
+            let is_h264 = new_pad_struct.get::<&str>("encoding-name").unwrap_or("").to_uppercase() == "H264";
+            info!("  - Is RTP: {}", is_rtp);
+            info!("  - Is video: {}", is_video);
+            info!("  - Is H264: {}", is_h264);
+            if !is_rtp { info!("[pad-added] pad is not RTP"); }
+            if is_rtp && !is_video { info!("[pad-added] pad is RTPだがvideoでない"); }
+            if is_rtp && is_video && !is_h264 { info!("[pad-added] padはvideoだがH264でない"); }
+            if is_rtp && is_video && is_h264 {
                 let identity_src_sink = match identity_src_clone.static_pad("sink") {
                     Some(pad) => {
                         info!("Got identity_src sink pad: name={}, direction={:?}, is_linked={}, caps={:?}",
@@ -312,111 +553,112 @@ impl StreamManager {
         // Set the pipeline to PLAYING and start receiving the stream
         pipeline.set_state(State::Playing)?;
 
-        // Wait for pipeline to reach PLAYING state
-        let state_change_result = pipeline.state(gstreamer::ClockTime::from_seconds(10));
-        match state_change_result {
-            (_, State::Playing, State::VoidPending) => {
-                info!("Pipeline successfully reached PLAYING state");
-            },
-            (_, current_state, pending_state) => {
-                warn!("Pipeline state change incomplete: current={:?}, pending={:?}", current_state, pending_state);
-                // Continue anyway, as some RTSP streams may take time to negotiate
-            }
+        // パイプラインの状態がPLAYINGになるまで待機
+        let (_, current_state, pending_state) = pipeline.state(gstreamer::ClockTime::from_seconds(10));
+        if current_state != State::Playing {
+            error!("Pipeline failed to reach PLAYING state: current={:?}, pending={:?}", current_state, pending_state);
+            return Err(RecordError::StreamError("Failed to start pipeline".into()));
         }
 
+        // パイプラインが安定するまで待機
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
         info!("Base pipeline created and set to PLAYING.");
-        *self.pipeline.lock().await = Some(pipeline);
-        *self.tee.lock().await = Some(tee);
-        state.is_connected = true;
+        state.pipeline = Some(pipeline);
+        state.tee = Some(tee);
         state.protocol = Some(protocol);
         state.url = Some(url.clone());
+        state.is_connected = true;  // 接続状態を設定
         self.is_tee_ready.store(false, Ordering::SeqCst); // 初期化
         Ok(())
     }
 
     /// Starts recording.
-    pub async fn start_recording(&self, recording_id: Uuid) -> Result<(), RecordError> {
-        tracing::info!("[start_recording] called with recording_id={}", recording_id);
+    pub async fn start_recording(&self, recording_id: &str, location: &str) -> Result<(), RecordError> {
+        info!("[recording {}] Starting recording at location: {}", recording_id, location);
+        let mut waited = 0;
         let mut state = self.state.lock().await;
-
-        if !state.is_connected {
-            tracing::error!("[start_recording] Not connected to stream");
-            return Err(RecordError::NotConnected);
-        }
-        if state.is_recording {
-            tracing::error!("[start_recording] Already recording");
-            return Err(RecordError::AlreadyRecording);
-        }
-
-        // Wait for the tee to be ready
-        for _ in 0..100 { // Wait for up to 10 seconds
-            if self.is_tee_ready.load(Ordering::SeqCst) {
-                break;
-            }
+        info!("[recording {}] [debug] start_recording: is_connected={} is_recording={}", recording_id, state.is_connected, state.is_recording);
+        // 5秒間（100msごとに）is_connectedをチェック
+        while !state.is_connected && waited < 50 {
+            drop(state);
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            waited += 1;
+            state = self.state.lock().await;
+            info!("[recording {}] [debug] waiting: is_connected={} is_recording={}", recording_id, state.is_connected, state.is_recording);
+        }
+        if !state.is_connected {
+            error!("[recording {}] Cannot start recording: stream is not connected", recording_id);
+            return Err(RecordError::StreamError("Stream is not connected".into()));
         }
 
-        if !self.is_tee_ready.load(Ordering::SeqCst) {
-            tracing::error!("[start_recording] Tee is not ready for recording");
-            return Err(RecordError::StreamError(
-                "Tee is not ready for recording. Check if RTSP stream is providing H264 video data.".into()
-            ));
+        if state.is_recording {
+            error!("[recording {}] Cannot start recording: already recording", recording_id);
+            return Err(RecordError::StreamError("Already recording".into()));
         }
 
-        let pipeline = self.pipeline.lock().await;
-        let pipeline = match pipeline.as_ref() {
-            Some(p) => p,
-            None => {
-                tracing::error!("[start_recording] Pipeline not found");
-                return Err(RecordError::StreamError("Pipeline not found".into()));
-            }
-        };
+        let pipeline = state.pipeline.as_ref().ok_or_else(|| {
+            error!("[recording {}] Cannot start recording: pipeline is not initialized", recording_id);
+            RecordError::StreamError("Pipeline is not initialized".into())
+        })?;
 
-        let tee = self.tee.lock().await;
-        let tee = match tee.as_ref() {
-            Some(t) => t,
-            None => {
-                tracing::error!("[start_recording] Tee element not found");
-                return Err(RecordError::StreamError("Tee element not found".into()));
-            }
-        };
+        let tee = state.tee.as_ref().ok_or_else(|| {
+            error!("[recording {}] Cannot start recording: tee element is not initialized", recording_id);
+            RecordError::StreamError("Tee element is not initialized".into())
+        })?;
 
-        // Generate file path
-        let mut path = PathBuf::from(&self.config.recording_directory);
-        tokio::fs::create_dir_all(&path).await?;
-        path.push(format!("{}.mp4", recording_id));
-        let location = path.to_str().ok_or_else(|| RecordError::StreamError("Invalid file path".into()))?;
+        // 親パイプラインの状態を確認
+        let (_, parent_state, _) = pipeline.state(gstreamer::ClockTime::from_seconds(1));
+        if parent_state != State::Playing {
+            error!("[recording {}] Parent pipeline is not in PLAYING state: {:?}", recording_id, parent_state);
+            return Err(RecordError::StreamError("Parent pipeline is not in PLAYING state".into()));
+        }
 
-        info!("Creating recording pipeline for file: {}", location);
-
-        // Create recording Bin
         info!("[recording {}] Creating recording pipeline elements", recording_id);
         let queue = ElementFactory::make("queue").name(&format!("rec_queue_{}", recording_id))
-            .property("max-size-buffers", &1000u32)  // バッファサイズを増加
-            .property("max-size-bytes", &10485760u32)  // 10MB
-            .property("max-size-time", &5000000000u64)  // 5秒
+            .property("max-size-buffers", &10000u32)  // バッファ数を増やす
+            .property("max-size-bytes", &104857600u32)  // 100MBに増やす
+            .property("max-size-time", &30000000000u64)  // 30秒に増やす
             .property_from_str("leaky", "downstream")
-            .property("silent", &false)  // デバッグ情報を有効化
-            .build()?;
+            .property("silent", &false)
+            .build()
+            .map_err(|e| {
+                error!("[recording {}] Failed to create queue element: {}", recording_id, e);
+                RecordError::StreamError(format!("Failed to create queue element: {}", e))
+            })?;
         info!("[recording {}] Created queue element: name={}", recording_id, queue.name());
 
         let parse = ElementFactory::make("h264parse").name(&format!("rec_h264parse_{}", recording_id))
             .property("config-interval", &-1i32)
             .property("disable-passthrough", &true)
-            .build()?;
+            .build()
+            .map_err(|e| {
+                error!("[recording {}] Failed to create h264parse element: {}", recording_id, e);
+                RecordError::StreamError(format!("Failed to create h264parse element: {}", e))
+            })?;
         info!("[recording {}] Created h264parse element: name={}", recording_id, parse.name());
 
-        let mux = ElementFactory::make("mp4mux").name(&format!("rec_mp4mux_{}", recording_id))
-            .property("faststart", &true)
-            .property("reserved-moov-update-period", &10000000000u64)  // 10秒
-            .build()?;
+        let mux = ElementFactory::make("mp4mux")
+            .property("faststart", true)
+            .property("reserved-moov-update-period", 1u64)
+            .property("streamable", true)
+            .property("fragment-duration", 1u32)
+            .build()
+            .map_err(|e| {
+                error!("[recording {}] Failed to create mp4mux element: {}", recording_id, e);
+                RecordError::StreamError(format!("Failed to create mp4mux element: {}", e))
+            })?;
         info!("[recording {}] Created mp4mux element: name={}", recording_id, mux.name());
 
         let sink = ElementFactory::make("filesink").name(&format!("rec_filesink_{}", recording_id))
             .property("location", &location)
             .property("sync", &false)
             .property("async", &false)
-            .build()?;
+            .build()
+            .map_err(|e| {
+                error!("[recording {}] Failed to create filesink element: {}", recording_id, e);
+                RecordError::StreamError(format!("Failed to create filesink element: {}", e))
+            })?;
         info!("[recording {}] Created filesink element: name={}", recording_id, sink.name());
 
         // Create recording Bin
@@ -425,18 +667,68 @@ impl StreamManager {
         info!("[recording {}] Created recording bin: name={}", recording_id, bin.name());
 
         // Add elements to bin
-        bin.add_many(&[&queue, &parse, &mux, &sink])?;
+        bin.add_many(&[&queue, &parse, &mux, &sink])
+            .map_err(|e| {
+                error!("[recording {}] Failed to add elements to recording bin: {}", recording_id, e);
+                RecordError::StreamError(format!("Failed to add elements to recording bin: {}", e))
+            })?;
         info!("[recording {}] Added elements to recording bin", recording_id);
 
         // Link elements
-        Element::link_many(&[&queue, &parse, &mux, &sink])?;
+        Element::link_many(&[&queue, &parse, &mux, &sink])
+            .map_err(|e| {
+                error!("[recording {}] Failed to link elements in recording bin: {}", recording_id, e);
+                RecordError::StreamError(format!("Failed to link elements in recording bin: {}", e))
+            })?;
         info!("[recording {}] Linked elements in recording bin", recording_id);
 
+        // パッドのリンク状態を確認
+        if let Some(queue_sink) = queue.static_pad("sink") {
+            info!("[recording {}] queue.sink pad state: is_linked={}, caps={:?}", 
+                recording_id, queue_sink.is_linked(), queue_sink.current_caps());
+        }
+        if let Some(queue_src) = queue.static_pad("src") {
+            info!("[recording {}] queue.src pad state: is_linked={}, caps={:?}", 
+                recording_id, queue_src.is_linked(), queue_src.current_caps());
+        }
+        if let Some(parse_sink) = parse.static_pad("sink") {
+            info!("[recording {}] parse.sink pad state: is_linked={}, caps={:?}", 
+                recording_id, parse_sink.is_linked(), parse_sink.current_caps());
+        }
+        if let Some(parse_src) = parse.static_pad("src") {
+            info!("[recording {}] parse.src pad state: is_linked={}, caps={:?}", 
+                recording_id, parse_src.is_linked(), parse_src.current_caps());
+        }
+        if let Some(mux_sink) = mux.static_pad("sink") {
+            info!("[recording {}] mux.sink pad state: is_linked={}, caps={:?}", 
+                recording_id, mux_sink.is_linked(), mux_sink.current_caps());
+        }
+        if let Some(mux_src) = mux.static_pad("src") {
+            info!("[recording {}] mux.src pad state: is_linked={}, caps={:?}", 
+                recording_id, mux_src.is_linked(), mux_src.current_caps());
+        }
+        if let Some(sink_sink) = sink.static_pad("sink") {
+            info!("[recording {}] sink.sink pad state: is_linked={}, caps={:?}", 
+                recording_id, sink_sink.is_linked(), sink_sink.current_caps());
+        }
+
         // Create ghost pad
-        let queue_sink_pad = queue.static_pad("sink").expect("Failed to get queue sink pad");
-        let ghost_pad = GhostPad::with_target(&queue_sink_pad).expect("Failed to create ghost pad");
-        ghost_pad.set_active(true).expect("Failed to activate ghost pad");
-        bin.add_pad(&ghost_pad)?;
+        let queue_sink_pad = queue.static_pad("sink").ok_or_else(|| {
+            error!("[recording {}] Failed to get queue sink pad", recording_id);
+            RecordError::StreamError("Failed to get queue sink pad".into())
+        })?;
+        let ghost_pad = GhostPad::with_target(&queue_sink_pad).map_err(|e| {
+            error!("[recording {}] Failed to create ghost pad: {}", recording_id, e);
+            RecordError::StreamError(format!("Failed to create ghost pad: {}", e))
+        })?;
+        ghost_pad.set_active(true).map_err(|e| {
+            error!("[recording {}] Failed to activate ghost pad: {}", recording_id, e);
+            RecordError::StreamError(format!("Failed to activate ghost pad: {}", e))
+        })?;
+        bin.add_pad(&ghost_pad).map_err(|e| {
+            error!("[recording {}] Failed to add ghost pad to recording bin: {}", recording_id, e);
+            RecordError::StreamError(format!("Failed to add ghost pad to recording bin: {}", e))
+        })?;
         info!("[recording {}] Added ghost pad to recording bin: name={}, is_active={}, is_linked={}, caps={:?}",
             recording_id,
             ghost_pad.name(),
@@ -446,42 +738,221 @@ impl StreamManager {
         );
 
         // Add buffer probes to all pads
-        let rec_id_probe = recording_id.clone();
+        let rec_id_probe = recording_id.to_string();
+        let rec_id_probe2 = rec_id_probe.clone();
         if let Some(queue_sink_pad) = queue.static_pad("sink") {
             queue_sink_pad.add_probe(PadProbeType::BUFFER, move |_, _| {
                 tracing::info!("[recording {}] [rec_bin] queue.sink BUFFER probe: buffer arrived", rec_id_probe);
                 PadProbeReturn::Ok
             });
-            info!("[recording {}] Added buffer probe to queue.sink pad", recording_id);
+            info!("[recording {}] Added buffer probe to queue.sink pad: is_linked={}, caps={:?}",
+                recording_id,
+                queue_sink_pad.is_linked(),
+                queue_sink_pad.current_caps()
+            );
+        }
+        let rec_id_probe = recording_id.to_string();
+        if let Some(parse_sink_pad) = parse.static_pad("sink") {
+            parse_sink_pad.add_probe(PadProbeType::BUFFER, move |_, _| {
+                tracing::info!("[recording {}] [rec_bin] h264parse.sink BUFFER probe: buffer arrived", rec_id_probe);
+                PadProbeReturn::Ok
+            });
+            info!("[recording {}] Added buffer probe to h264parse.sink pad: is_linked={}, caps={:?}",
+                recording_id,
+                parse_sink_pad.is_linked(),
+                parse_sink_pad.current_caps()
+            );
+        }
+        let rec_id_probe = recording_id.to_string();
+        if let Some(parse_src_pad) = parse.static_pad("src") {
+            parse_src_pad.add_probe(PadProbeType::BUFFER, move |_, _| {
+                tracing::info!("[recording {}] [rec_bin] h264parse.src BUFFER probe: buffer arrived", rec_id_probe);
+                PadProbeReturn::Ok
+            });
+            info!("[recording {}] Added buffer probe to h264parse.src pad: is_linked={}, caps={:?}",
+                recording_id,
+                parse_src_pad.is_linked(),
+                parse_src_pad.current_caps()
+            );
+        }
+        let rec_id_probe = recording_id.to_string();
+        if let Some(mux_sink_pad) = mux.static_pad("sink") {
+            mux_sink_pad.add_probe(PadProbeType::BUFFER, move |_, _| {
+                tracing::info!("[recording {}] [rec_bin] mp4mux.sink BUFFER probe: buffer arrived", rec_id_probe);
+                PadProbeReturn::Ok
+            });
+            info!("[recording {}] mp4mux.sink pad details: is_linked={}, caps={:?}, peer={:?}, direction={:?}",
+                recording_id,
+                mux_sink_pad.is_linked(),
+                mux_sink_pad.current_caps(),
+                mux_sink_pad.peer().map(|p| p.name()),
+                mux_sink_pad.direction()
+            );
+        }
+        if let Some(mux_src_pad) = mux.static_pad("src") {
+            mux_src_pad.add_probe(PadProbeType::BUFFER, move |_, _| {
+                tracing::info!("[recording {}] [rec_bin] mp4mux.src BUFFER probe: buffer arrived", rec_id_probe2);
+                PadProbeReturn::Ok
+            });
+            info!("[recording {}] mp4mux.src pad details: is_linked={}, caps={:?}, peer={:?}, direction={:?}",
+                recording_id,
+                mux_src_pad.is_linked(),
+                mux_src_pad.current_caps(),
+                mux_src_pad.peer().map(|p| p.name()),
+                mux_src_pad.direction()
+            );
+        }
+        let rec_id_probe = recording_id.to_string();
+        if let Some(filesink_sink_pad) = sink.static_pad("sink") {
+            filesink_sink_pad.add_probe(PadProbeType::BUFFER, move |_, _| {
+                tracing::info!("[recording {}] [rec_bin] filesink.sink BUFFER probe: buffer arrived", rec_id_probe);
+                PadProbeReturn::Ok
+            });
+            info!("[recording {}] filesink.sink pad details: is_linked={}, caps={:?}, peer={:?}, direction={:?}",
+                recording_id,
+                filesink_sink_pad.is_linked(),
+                filesink_sink_pad.current_caps(),
+                filesink_sink_pad.peer().map(|p| p.name()),
+                filesink_sink_pad.direction()
+            );
         }
 
+        // Add bus watch for recording bin
+        let rec_id_state = recording_id.to_string();
+        let bus = pipeline.bus().ok_or_else(|| RecordError::StreamError("Failed to get bus from pipeline".into()))?;
+        let bin_clone = bin.clone();
+        let _watch_id = bus.add_watch(move |_, msg| {
+            match msg.view() {
+                MessageView::Error(err) => {
+                    error!("[recording {}] Error from recording bin: {}", rec_id_state, err.error());
+                    if let Some(debug) = err.debug() {
+                        error!("[recording {}] Debug info: {:?}", rec_id_state, debug(&err));
+                    }
+                    // エラーが発生した場合、パイプラインを停止
+                    if let Some(element) = err.src() {
+                        if let Some(pipeline) = element.parent() {
+                            if let Some(pipeline) = pipeline.downcast_ref::<gstreamer::Pipeline>() {
+                                let _ = pipeline.set_state(gstreamer::State::Null);
+                            }
+                        }
+                    }
+                }
+                MessageView::Warning(warn) => {
+                    warn!("[recording {}] Warning from recording bin: {}", rec_id_state, warn.error());
+                    if let Some(debug) = warn.debug() {
+                        warn!("[recording {}] Debug info: {:?}", rec_id_state, debug(&warn));
+                    }
+                }
+                MessageView::Eos(_) => {
+                    info!("[recording {}] End of stream from recording bin", rec_id_state);
+                    // EOSが発生した場合、パイプラインを停止
+                    if let Some(pipeline) = bin_clone.parent() {
+                        if let Some(pipeline) = pipeline.downcast_ref::<gstreamer::Pipeline>() {
+                            let _ = pipeline.set_state(gstreamer::State::Null);
+                        }
+                    }
+                }
+                MessageView::StateChanged(state) => {
+                    let old = state.old();
+                    let new = state.current();
+                    let pending = state.pending();
+                    info!("[recording {}] State changed from {:?} to {:?} (pending: {:?})", rec_id_state, old, new, pending);
+                    if new == gstreamer::State::Playing {
+                        info!("[recording {}] Recording bin is now playing", rec_id_state);
+                    }
+                }
+                MessageView::Buffering(buffering) => {
+                    info!("[recording {}] Buffering: {}%", rec_id_state, buffering.percent());
+                }
+                _ => {}
+            }
+            glib::ControlFlow::Continue
+        }).unwrap();
+
         // Add recording Bin to the pipeline
-        pipeline.add(&bin)?;
+        pipeline.add(&bin).map_err(|e| {
+            error!("[recording {}] Failed to add recording bin to pipeline: {}", recording_id, e);
+            RecordError::StreamError(format!("Failed to add recording bin to pipeline: {}", e))
+        })?;
         info!("[recording {}] Added recording bin to pipeline", recording_id);
 
         // Link the request pad of tee to the sink of the recording bin
         let tee_src_pad = tee.request_pad_simple("src_%u").ok_or_else(|| {
-            error!("Failed to request tee src pad");
+            error!("[recording {}] Failed to request tee src pad", recording_id);
             RecordError::StreamError("Failed to request tee src pad".into())
         })?;
 
         let recording_bin_sink_pad = bin.static_pad("sink").ok_or_else(|| {
-            error!("Failed to get recording bin sink pad");
+            error!("[recording {}] Failed to get recording bin sink pad", recording_id);
             RecordError::StreamError("Failed to get recording bin sink pad".into())
         })?;
 
+        // パッドのリンク前にキャプスを確認
+        info!("[recording {}] Before linking pads:", recording_id);
+        info!("  - tee_src_pad caps: {:?}", tee_src_pad.current_caps());
+        info!("  - recording_bin_sink_pad caps: {:?}", recording_bin_sink_pad.current_caps());
+
+        // キャプスの互換性を確認
+        let tee_caps = tee_src_pad.current_caps().or_else(|| {
+            warn!("[recording {}] tee_src_pad.current_caps() is None, fallback to query_caps(None)", recording_id);
+            Some(tee_src_pad.query_caps(None))
+        }).ok_or_else(|| {
+            error!("[recording {}] Failed to get tee src pad caps", recording_id);
+            RecordError::StreamError("Failed to get tee src pad caps".into())
+        })?;
+
+        let bin_caps = recording_bin_sink_pad.current_caps().or_else(|| {
+            warn!("[recording {}] recording_bin_sink_pad.current_caps() is None, fallback to query_caps(None)", recording_id);
+            Some(recording_bin_sink_pad.query_caps(None))
+        }).ok_or_else(|| {
+            error!("[recording {}] Failed to get recording bin sink pad caps", recording_id);
+            RecordError::StreamError("Failed to get recording bin sink pad caps".into())
+        })?;
+
+        info!("[recording {}] Checking caps compatibility:", recording_id);
+        info!("  - tee_src_pad caps structure: {:?}", tee_caps.structure(0));
+        info!("  - recording_bin_sink_pad caps structure: {:?}", bin_caps.structure(0));
+
+        // キャプスの互換性を確認
+        if !tee_caps.can_intersect(&bin_caps) {
+            error!("[recording {}] Caps are not compatible: tee={:?}, bin={:?}", 
+                recording_id, tee_caps, bin_caps);
+            return Err(RecordError::StreamError(format!(
+                "Caps are not compatible: tee={:?}, bin={:?}",
+                tee_caps, bin_caps
+            )));
+        }
+
         match tee_src_pad.link(&recording_bin_sink_pad) {
             Ok(_) => {
-                info!("Successfully linked tee src pad to recording bin sink pad");
+                info!("[recording {}] Successfully linked tee src pad to recording bin sink pad", recording_id);
+                info!("[recording {}] Link details after successful linking:", recording_id);
+                info!("  - tee_src_pad: name={}, direction={:?}, is_linked={}, caps={:?}, peer={:?}",
+                    tee_src_pad.name(),
+                    tee_src_pad.direction(),
+                    tee_src_pad.is_linked(),
+                    tee_src_pad.current_caps(),
+                    tee_src_pad.peer().map(|p| p.name())
+                );
+                info!("  - recording_bin_sink_pad: name={}, direction={:?}, is_linked={}, caps={:?}, peer={:?}",
+                    recording_bin_sink_pad.name(),
+                    recording_bin_sink_pad.direction(),
+                    recording_bin_sink_pad.is_linked(),
+                    recording_bin_sink_pad.current_caps(),
+                    recording_bin_sink_pad.peer().map(|p| p.name())
+                );
             }
             Err(e) => {
-                error!("Failed to link pads: {}", e);
-                return Err(RecordError::StreamError(format!("Failed to link pads: {}", e)));
+                error!("[recording {}] Failed to link pads: {}", recording_id, e);
+                return Err(RecordError::StreamError(format!(
+                    "Failed to link pads: {} (tee_caps={:?}, bin_caps={:?})",
+                    e, tee_caps, bin_caps
+                )));
             }
         }
 
         // Record the pad (for use when stopping)
-        self.recording_pads.lock().await.insert(recording_id, tee_src_pad.clone());
+        self.recording_pads.lock().await.insert(recording_id.to_string(), tee_src_pad.clone());
         info!("[recording {}] Recorded tee src pad for later use", recording_id);
         
         // Sync the state of the recording Bin with the parent pipeline
@@ -496,14 +967,47 @@ impl StreamManager {
             state_change
         );
 
+        // パイプラインの状態を確認
+        let (_, current_state, pending_state) = bin.state(gstreamer::ClockTime::from_seconds(30));  // 待機時間を30秒に増やす
+        if current_state != State::Playing {
+            error!("[recording {}] Recording bin failed to reach PLAYING state: current={:?}, pending={:?}", 
+                recording_id, current_state, pending_state);
+            return Err(RecordError::StreamError(format!(
+                "Failed to start recording bin: current={:?}, pending={:?}",
+                current_state, pending_state
+            )));
+        }
+
+        // 各要素の状態を確認
+        let (_, queue_state, _) = queue.state(gstreamer::ClockTime::from_seconds(1));
+        let (_, parse_state, _) = parse.state(gstreamer::ClockTime::from_seconds(1));
+        let (_, mux_state, _) = mux.state(gstreamer::ClockTime::from_seconds(1));
+        let (_, sink_state, _) = sink.state(gstreamer::ClockTime::from_seconds(1));
+        
+        info!(
+            "[recording {}] Element states: queue={:?}, parse={:?}, mux={:?}, sink={:?}",
+            recording_id,
+            queue_state,
+            parse_state,
+            mux_state,
+            sink_state
+        );
+
+        // すべての要素がPLAYING状態であることを確認
+        if queue_state != State::Playing || parse_state != State::Playing || 
+           mux_state != State::Playing || sink_state != State::Playing {
+            error!("[recording {}] Some elements failed to reach PLAYING state", recording_id);
+            return Err(RecordError::StreamError("Some elements failed to reach PLAYING state".into()));
+        }
+
         state.is_recording = true;
-        state.current_recording_id = Some(recording_id);
+        state.current_recording_id = Some(recording_id.to_string());
         info!("[recording {}] Successfully started recording", recording_id);
         Ok(())
     }
 
     /// Stops recording.
-    pub async fn stop_recording(&self) -> Result<Uuid, RecordError> {
+    pub async fn stop_recording(&self) -> Result<String, RecordError> {
         let mut state = self.state.lock().await;
         if !state.is_recording {
             return Err(RecordError::StreamError("No recording is in progress".into()));
@@ -517,29 +1021,20 @@ impl StreamManager {
         };
         info!(%recording_id, "Stopping recording");
         
-        let pipeline = self.pipeline.lock().await;
-        let pipeline = match pipeline.as_ref() {
-            Some(p) => p,
-            None => {
-                tracing::warn!("No pipeline found in stop_recording");
-                return Err(RecordError::StreamError("No pipeline found in stop_recording".to_string()));
-            }
-        };
+        let pipeline = state.pipeline.as_ref().ok_or_else(|| {
+            error!("[recording {}] Cannot stop recording: pipeline is not initialized", &recording_id);
+            RecordError::StreamError("Pipeline is not initialized".into())
+        })?;
 
-        let rec_bin = match pipeline.by_name(&format!("rec-bin-{}", recording_id)) {
-            Some(bin) => bin,
+        // EOSイベントの処理を改善
+        let sink_pad = match pipeline.by_name(&format!("rec-bin-{}", recording_id)) {
+            Some(bin) => bin.static_pad("sink").ok_or_else(|| {
+                error!("[recording {}] rec_bin sink pad not found in stop_recording for recording_id={}", recording_id, recording_id);
+                RecordError::StreamError("rec_bin sink pad not found in stop_recording".to_string())
+            })?,
             None => {
                 tracing::warn!("rec_bin not found in pipeline for recording_id={}", recording_id);
                 return Err(RecordError::StreamError("rec_bin not found in pipeline".to_string()));
-            }
-        };
-
-        // EOSイベントの処理を改善
-        let sink_pad = match rec_bin.static_pad("sink") {
-            Some(pad) => pad,
-            None => {
-                tracing::warn!("rec_bin sink pad not found in stop_recording for recording_id={}", recording_id);
-                return Err(RecordError::StreamError("rec_bin sink pad not found in stop_recording".to_string()));
             }
         };
         
@@ -561,10 +1056,13 @@ impl StreamManager {
         std::thread::sleep(std::time::Duration::from_millis(5000));  // 5秒待機
 
         // パイプラインからrec_binを削除
-        pipeline.remove(&rec_bin)?;
+        let bin_name = format!("rec-bin-{}", recording_id);
+        if let Some(bin) = pipeline.by_name(&bin_name) {
+            pipeline.remove(&bin)?;
+        }
         
         // rec_binの状態をNULLに設定
-        rec_bin.set_state(State::Null)?;
+        pipeline.set_state(State::Null)?;
 
         // ファイルが完全に書き込まれるまで追加で待機
         std::thread::sleep(std::time::Duration::from_millis(2000));  // 2秒待機
@@ -592,15 +1090,12 @@ impl StreamManager {
         
         info!("Disconnecting from stream and stopping pipeline...");
         
-        let mut pipeline = self.pipeline.lock().await;
-        if let Some(p) = pipeline.take() {
+        if let Some(p) = state.pipeline.take() {
             p.set_state(State::Null)?;
             info!("Pipeline stopped and destroyed successfully.");
         }
 
-        *state = StreamState::default();
-        *self.tee.lock().await = None;
-
+        *state = StreamState::new();
         info!("Disconnected from stream and stopped pipeline.");
         Ok(())
     }
