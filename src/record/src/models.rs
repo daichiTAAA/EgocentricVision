@@ -89,6 +89,20 @@ pub struct RecordingDetails {
     pub status: RecordingStatus,
 }
 
+#[derive(Debug, Serialize)]
+pub struct DebugStatus {
+    pub is_connected: bool,
+    pub is_recording: bool,
+    pub protocol: Option<String>,
+    pub url: Option<String>,
+    pub tee_ready: bool,
+    pub pipeline_state: Option<String>,
+    pub pipeline_pending_state: Option<String>,
+    pub tee_state: Option<String>,
+    pub tee_pending_state: Option<String>,
+    pub active_recording_pads: usize,
+}
+
 impl From<Recording> for RecordingListItem {
     fn from(recording: Recording) -> Self {
         Self {

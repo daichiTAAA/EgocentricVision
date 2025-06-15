@@ -7,7 +7,7 @@ use tracing::info;
 use crate::app::AppState;
 use crate::error::RecordError;
 use crate::models::{
-    ConnectRequest, ConnectResponse, DisconnectResponse, StreamStatus,
+    ConnectRequest, ConnectResponse, DisconnectResponse, StreamStatus, DebugStatus,
 };
 
 pub async fn connect(
@@ -57,7 +57,9 @@ pub async fn status(
 
 pub async fn debug_status(
     State(app_state): State<Arc<AppState>>,
-) -> Result<String, RecordError> {
+) -> Result<Json<DebugStatus>, RecordError> {
+    info!("Received debug status request");
     let detailed_status = app_state.stream_manager.get_detailed_status().await;
-    Ok(detailed_status)
+    info!("Debug status: {:?}", detailed_status);
+    Ok(Json(detailed_status))
 }

@@ -23,6 +23,7 @@ use tokio::time::sleep;
 use glib::ControlFlow;
 use glib::LogLevel;
 use gstreamer::DebugLevel;
+use crate::models::DebugStatus;
 
 /// Stores the logical state of the stream.
 #[derive(Debug, Clone, Default)]
@@ -317,37 +318,37 @@ impl StreamManager {
     }
 
     /// Returns detailed status of the pipeline and Tee (for debugging)
-    pub async fn get_detailed_status(&self) -> String {
+    pub async fn get_detailed_status(&self) -> DebugStatus {
         let state = self.state.lock().await;
-        let pipeline_lock = self.state.lock().await.pipeline.as_ref().map(|p| p.state(gstreamer::ClockTime::ZERO));
-        let tee_lock = self.state.lock().await.tee.as_ref().map(|t| t.state(gstreamer::ClockTime::ZERO));
+        let pipeline_state = state.pipeline.as_ref().map(|p| p.state(gstreamer::ClockTime::ZERO));
+        let tee_state = state.tee.as_ref().map(|t| t.state(gstreamer::ClockTime::ZERO));
         
-        let mut status = format!(
-            "StreamManager Status:\n  Connected: {}\n  Recording: {}\n  Protocol: {:?}\n  URL: {:?}\n",
-            state.is_connected,
-            state.is_recording,
-            state.protocol,
-            state.url
-        );
-        
-        status.push_str(&format!("  Tee Ready: {}\n", self.is_tee_ready.load(Ordering::SeqCst)));
-        
-        if let Some((_, current_state, pending_state)) = pipeline_lock {
-            status.push_str(&format!("  Pipeline State: {:?} (pending: {:?})\n", current_state, pending_state));
+        let (pipeline_current, pipeline_pending) = if let Some((_, current, pending)) = pipeline_state {
+            (Some(format!("{:?}", current)), Some(format!("{:?}", pending)))
         } else {
-            status.push_str("  Pipeline: None\n");
-        }
-        
-        if let Some((_, current_state, pending_state)) = tee_lock {
-            status.push_str(&format!("  Tee State: {:?} (pending: {:?})\n", current_state, pending_state));
+            (None, None)
+        };
+
+        let (tee_current, tee_pending) = if let Some((_, current, pending)) = tee_state {
+            (Some(format!("{:?}", current)), Some(format!("{:?}", pending)))
         } else {
-            status.push_str("  Tee: None\n");
-        }
-        
+            (None, None)
+        };
+
         let recording_pads = self.recording_pads.lock().await;
-        status.push_str(&format!("  Active Recording Pads: {}\n", recording_pads.len()));
         
-        status
+        DebugStatus {
+            is_connected: state.is_connected,
+            is_recording: state.is_recording,
+            protocol: state.protocol.clone(),
+            url: state.url.clone(),
+            tee_ready: self.is_tee_ready.load(Ordering::SeqCst),
+            pipeline_state: pipeline_current,
+            pipeline_pending_state: pipeline_pending,
+            tee_state: tee_current,
+            tee_pending_state: tee_pending,
+            active_recording_pads: recording_pads.len(),
+        }
     }
 
     /// Connects to an RTSP stream and builds a pipeline ready for playback.
