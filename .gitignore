@@ -196,3 +196,5 @@ cython_debug/
 # data
 *.mp4
 .DS_Store
+
+!src/frontend/src/lib

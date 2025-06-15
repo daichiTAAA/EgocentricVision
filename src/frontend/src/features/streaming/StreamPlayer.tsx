@@ -1,35 +1,44 @@
 import React from 'react';
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  Box,
-  Typography,
-} from '@mui/material';
+import { Card, CardContent, CardHeader, Typography } from '@mui/material';
+import ReactPlayer from 'react-player';
 
-export const StreamPlayer: React.FC = () => {
+interface StreamPlayerProps {
+  rtspUrl?: string;
+}
+
+export const StreamPlayer: React.FC<StreamPlayerProps> = ({ rtspUrl }) => {
+  const [webrtcUrl, setWebrtcUrl] = React.useState<string | undefined>(undefined);
+
+  React.useEffect(() => {
+    if (rtspUrl) {
+      // RTSP URLをWebRTC URLに変換
+      const webrtcUrl = rtspUrl.replace('rtsp://', 'http://').replace('8554', '8889');
+      setWebrtcUrl(webrtcUrl);
+    } else {
+      setWebrtcUrl(undefined);
+    }
+  }, [rtspUrl]);
+
   return (
     <Card>
-      <CardHeader title="ライブストリーム" />
+      <CardHeader title="ストリームプレーヤー" />
       <CardContent>
-        <Box
-          sx={{
-            width: '100%',
-            height: 400,
-            backgroundColor: '#000',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            borderRadius: 1,
-          }}
-        >
-          <Typography color="white" variant="h6">
-            ストリーム表示エリア
+        {webrtcUrl ? (
+          <div style={{ position: 'relative', paddingTop: '56.25%' }}>
+            <ReactPlayer
+              url={webrtcUrl}
+              width="100%"
+              height="100%"
+              style={{ position: 'absolute', top: 0, left: 0 }}
+              playing
+              controls
+            />
+          </div>
+        ) : (
+          <Typography variant="body1" color="text.secondary">
+            ストリームを接続するとプレーヤーが表示されます
           </Typography>
-        </Box>
-        <Typography variant="caption" sx={{ mt: 1, display: 'block' }}>
-          ※ 動画ストリーミング機能は今後実装予定
-        </Typography>
+        )}
       </CardContent>
     </Card>
   );
