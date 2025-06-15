@@ -15,7 +15,12 @@ export const recordingsApi = {
     apiClient.get(`/api/v1/recordings/${id}`),
   
   download: (id: string) =>
-    apiClient.get(`/api/v1/recordings/${id}/download`, { responseType: 'blob' }),
+    apiClient.get(`/api/v1/recordings/${id}/download`, {
+      responseType: 'blob',
+      headers: {
+        Accept: 'video/mp4'
+      }
+    }),
   
   delete: (id: string) =>
     apiClient.delete(`/api/v1/recordings/${id}`),

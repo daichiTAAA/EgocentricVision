@@ -12,9 +12,9 @@ export interface Recording {
   filename: string;
   start_time: string;
   end_time?: string;
-  duration?: number;
-  size?: number;
-  status: 'recording' | 'completed' | 'failed';
+  duration_seconds?: number;
+  file_size_bytes?: number;
+  status: 'RECORDING' | 'COMPLETED' | 'FAILED';
 }
 
 export interface StreamConnectRequest {

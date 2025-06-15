@@ -15,6 +15,7 @@ import {
 import { Download, Delete, PlayArrow } from '@mui/icons-material';
 import { useRecordings, useDeleteRecording } from '@/hooks/useRecording';
 import { useUIStore } from '@/store';
+import { recordingsApi } from '@/api';
 
 export const RecordingsList: React.FC = () => {
   const { data: recordings, isLoading } = useRecordings();
@@ -29,6 +30,118 @@ export const RecordingsList: React.FC = () => {
       } catch (error) {
         addNotification('録画削除に失敗しました', 'error');
       }
+    }
+  };
+
+  const handlePlay = async (id: string) => {
+    try {
+      const response = await recordingsApi.download(id);
+      const blob = new Blob([response.data], { type: 'video/mp4' });
+      const url = window.URL.createObjectURL(blob);
+      
+      const dialog = document.createElement('dialog');
+      dialog.style.width = '80%';
+      dialog.style.maxWidth = '800px';
+      dialog.style.padding = '20px';
+      dialog.style.position = 'relative';
+      dialog.style.border = 'none';
+      dialog.style.borderRadius = '12px';
+      dialog.style.background = '#fff';
+      dialog.style.boxShadow = '0 4px 24px rgba(0,0,0,0.2)';
+
+      const video = document.createElement('video');
+      video.src = url;
+      video.controls = true;
+      video.style.width = '100%';
+      video.style.maxHeight = '80vh';
+
+      const closeButton = document.createElement('button');
+      closeButton.innerHTML = '×';
+      closeButton.setAttribute('aria-label', '閉じる');
+      closeButton.style.position = 'absolute';
+      closeButton.style.right = '16px';
+      closeButton.style.top = '16px';
+      closeButton.style.width = '40px';
+      closeButton.style.height = '40px';
+      closeButton.style.background = '#fff';
+      closeButton.style.border = '2px solid #888';
+      closeButton.style.borderRadius = '50%';
+      closeButton.style.fontSize = '28px';
+      closeButton.style.fontWeight = 'bold';
+      closeButton.style.cursor = 'pointer';
+      closeButton.style.color = '#333';
+      closeButton.style.display = 'flex';
+      closeButton.style.alignItems = 'center';
+      closeButton.style.justifyContent = 'center';
+      closeButton.style.boxShadow = '0 2px 8px rgba(0,0,0,0.08)';
+      closeButton.style.zIndex = '1000';
+
+      const closeDialog = () => {
+        dialog.close();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(dialog);
+      };
+
+      closeButton.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        closeDialog();
+      };
+
+      closeButton.onmouseenter = () => {
+        closeButton.style.background = '#f44336';
+        closeButton.style.color = '#fff';
+        closeButton.style.borderColor = '#f44336';
+      };
+
+      closeButton.onmouseleave = () => {
+        closeButton.style.background = '#fff';
+        closeButton.style.color = '#333';
+        closeButton.style.borderColor = '#888';
+      };
+
+      dialog.appendChild(closeButton);
+      dialog.appendChild(video);
+      document.body.appendChild(dialog);
+      dialog.showModal();
+
+      dialog.addEventListener('click', (e) => {
+        if (e.target === dialog) {
+          closeDialog();
+        }
+      });
+    } catch (error) {
+      addNotification('録画の再生に失敗しました', 'error');
+    }
+  };
+
+  const handleDownload = async (id: string, filename: string) => {
+    try {
+      const response = await recordingsApi.download(id);
+      const contentType = response.headers['content-type'] || 'video/mp4';
+      const blob = new Blob([response.data], { type: contentType });
+      const url = window.URL.createObjectURL(blob);
+      const safeFilename = filename.endsWith('.mp4') ? filename : `${filename}.mp4`;
+      
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = safeFilename;
+      link.style.display = 'none';
+      document.body.appendChild(link);
+      
+      // クリックイベントを発火
+      link.click();
+      
+      // クリーンアップ
+      setTimeout(() => {
+        document.body.removeChild(link);
+        window.URL.revokeObjectURL(url);
+      }, 100);
+
+      addNotification('録画のダウンロードを開始しました', 'success');
+    } catch (error) {
+      console.error('Download error:', error);
+      addNotification('録画のダウンロードに失敗しました', 'error');
     }
   };
 
@@ -70,22 +183,32 @@ export const RecordingsList: React.FC = () => {
                         開始: {new Date(recording.start_time).toLocaleString()}
                       </Typography>
                       <Typography variant="caption" component="div">
-                        時間: {formatDuration(recording.duration)}
+                        時間: {formatDuration(recording.duration_seconds)}
                       </Typography>
                       <Chip
                         label={recording.status}
                         size="small"
-                        color={recording.status === 'completed' ? 'success' : 'default'}
+                        color={recording.status === 'COMPLETED' ? 'success' : 'default'}
                         sx={{ mt: 0.5 }}
                       />
                     </Box>
                   }
                 />
                 <ListItemSecondaryAction>
-                  <IconButton edge="end" aria-label="play" sx={{ mr: 1 }}>
+                  <IconButton 
+                    edge="end" 
+                    aria-label="play" 
+                    sx={{ mr: 1 }}
+                    onClick={() => handlePlay(recording.id)}
+                  >
                     <PlayArrow />
                   </IconButton>
-                  <IconButton edge="end" aria-label="download" sx={{ mr: 1 }}>
+                  <IconButton 
+                    edge="end" 
+                    aria-label="download" 
+                    sx={{ mr: 1 }}
+                    onClick={() => handleDownload(recording.id, recording.filename)}
+                  >
                     <Download />
                   </IconButton>
                   <IconButton
