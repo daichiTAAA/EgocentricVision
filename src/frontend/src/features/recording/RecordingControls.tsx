@@ -19,8 +19,8 @@ export const RecordingControls: React.FC = () => {
   const stopRecordingMutation = useStopRecording();
   const { addNotification } = useUIStore();
 
-  const isRecording = false; // TODO: Get from stream status
-  const canRecord = streamStatus?.connected;
+  const isRecording = streamStatus?.is_recording || false;
+  const canRecord = streamStatus?.is_connected && !isRecording;
 
   const handleStartRecording = async () => {
     try {

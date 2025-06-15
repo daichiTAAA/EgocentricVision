@@ -27,10 +27,14 @@ export const StreamConnectForm: React.FC = () => {
 
   const onSubmit = async (data: StreamConnectFormData) => {
     try {
-      await connectMutation.mutateAsync(data);
+      await connectMutation.mutateAsync({
+        ...data,
+        protocol: 'rtsp'
+      });
       addNotification('ストリームに接続しました', 'success');
-    } catch (error) {
-      addNotification('ストリーム接続に失敗しました', 'error');
+    } catch (error: any) {
+      const errorMessage = error.response?.data?.error || 'ストリーム接続に失敗しました';
+      addNotification(errorMessage, 'error');
     }
   };
 
@@ -38,8 +42,9 @@ export const StreamConnectForm: React.FC = () => {
     try {
       await disconnectMutation.mutateAsync();
       addNotification('ストリームを切断しました', 'success');
-    } catch (error) {
-      addNotification('ストリーム切断に失敗しました', 'error');
+    } catch (error: any) {
+      const errorMessage = error.response?.data?.error || 'ストリーム切断に失敗しました';
+      addNotification(errorMessage, 'error');
     }
   };
 
@@ -47,7 +52,7 @@ export const StreamConnectForm: React.FC = () => {
     <Card>
       <CardHeader title="ストリーム接続" />
       <CardContent>
-        {streamStatus?.connected && (
+        {streamStatus?.is_connected && (
           <Alert severity="success" sx={{ mb: 2 }}>
             ストリーム接続中: {streamStatus.url}
           </Alert>
@@ -61,14 +66,20 @@ export const StreamConnectForm: React.FC = () => {
 
         <Box component="form" onSubmit={handleSubmit(onSubmit)} sx={{ mt: 2 }}>
           <TextField
-            {...register('url', { required: 'URLは必須です' })}
+            {...register('url', {
+              required: 'URLは必須です',
+              pattern: {
+                value: /^rtsp:\/\/.+/,
+                message: 'RTSP URLを入力してください（例: rtsp://example.com/stream）'
+              }
+            })}
             label="ストリームURL"
             fullWidth
             margin="normal"
             error={!!errors.url}
             helperText={errors.url?.message}
             placeholder="rtsp://example.com/stream"
-            disabled={streamStatus?.connected}
+            disabled={streamStatus?.is_connected}
           />
           
           <TextField
@@ -76,7 +87,7 @@ export const StreamConnectForm: React.FC = () => {
             label="ユーザー名（任意）"
             fullWidth
             margin="normal"
-            disabled={streamStatus?.connected}
+            disabled={streamStatus?.is_connected}
           />
           
           <TextField
@@ -85,11 +96,11 @@ export const StreamConnectForm: React.FC = () => {
             type="password"
             fullWidth
             margin="normal"
-            disabled={streamStatus?.connected}
+            disabled={streamStatus?.is_connected}
           />
 
           <Box sx={{ mt: 2, display: 'flex', gap: 2 }}>
-            {!streamStatus?.connected ? (
+            {!streamStatus?.is_connected ? (
               <Button
                 type="submit"
                 variant="contained"

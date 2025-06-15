@@ -1,6 +1,9 @@
 export interface StreamStatus {
-  connected: boolean;
+  is_connected: boolean;
+  is_recording: boolean;
+  protocol?: string;
   url?: string;
+  connected_at?: string | null;
   error?: string;
 }
 
@@ -15,6 +18,7 @@ export interface Recording {
 }
 
 export interface StreamConnectRequest {
+  protocol: 'rtsp';
   url: string;
   username?: string;
   password?: string;
