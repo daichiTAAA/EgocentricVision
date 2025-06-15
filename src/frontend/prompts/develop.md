@@ -1,0 +1,1 @@
+下記の内容をもとに修正し、docker compose down -v && docker compose up --build -dでチェックし、問題がある場合は許可を求めずに自動で修正し、再度docker compose down -v && docker compose up --build -dを実行してチェックするというように目的達成まで自動で修正して下さい。
