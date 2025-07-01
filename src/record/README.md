@@ -5,7 +5,7 @@ This is the Record service for EgocentricVision project, a Rust-based applicatio
 ## Features
 
 - REST API for recording management
-- RTSP stream connection and recording
+- Multiple RTSP/WebRTC stream connection and recording
 - PostgreSQL database integration
 - Docker containerization support
 
@@ -57,41 +57,158 @@ curl http://localhost:3000/health
 
 ### Stream Management
 ```bash
-# Connect to RTSP Stream
+# Connect to Stream
 curl -X POST http://localhost:3000/api/v1/streams/connect \
   -H "Content-Type: application/json" \
-  -d '{"protocol": "rtsp", "url": "rtsp://192.168.0.18:8554/cam"}'
+  -d '{"protocol": "rtsp", "url": "rtsp://192.168.0.18:8554/cam1"}'
 
-# Check Stream Status
+# Response
+{
+  "stream_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "CONNECTING",
+  "message": "Stream connection initiated for protocol: rtsp"
+}
+
+# List All Streams
 curl http://localhost:3000/api/v1/streams/status
 
-# Debug Stream Details (includes GStreamer pipeline state)
-curl http://localhost:3000/api/v1/streams/debug
+# Response
+{
+  "streams": {
+    "550e8400-e29b-41d4-a716-446655440000": {
+      "is_connected": true,
+      "protocol": "rtsp",
+      "url": "rtsp://192.168.0.18:8554/cam1",
+      "is_recording": false,
+      "connected_at": "2024-03-14T05:30:00Z"
+    }
+  }
+}
 
-# Disconnect from Stream
-curl -X POST http://localhost:3000/api/v1/streams/disconnect
+# Get Stream Status
+curl http://localhost:3000/api/v1/streams/{stream_id}/status
+
+# Response
+{
+  "is_connected": true,
+  "protocol": "rtsp",
+  "url": "rtsp://192.168.0.18:8554/cam1",
+  "is_recording": false,
+  "connected_at": "2024-03-14T05:30:00Z"
+}
+
+# Debug Stream Details
+curl http://localhost:3000/api/v1/streams/{stream_id}/debug
+
+# Response
+{
+  "is_connected": true,
+  "protocol": "rtsp",
+  "url": "rtsp://192.168.0.18:8554/cam1",
+  "is_recording": false,
+  "connected_at": "2024-03-14T05:30:00Z",
+  "pipeline_state": "PLAYING",
+  "pipeline_info": {
+    "elements": ["rtspsrc", "rtph264depay", "h264parse", "mp4mux", "filesink"],
+    "state_details": "All elements in PLAYING state"
+  }
+}
+
+# Disconnect Stream
+curl -X POST http://localhost:3000/api/v1/streams/{stream_id}/disconnect
+
+# Response
+{
+  "stream_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "DISCONNECTING",
+  "message": "Stream disconnection initiated."
+}
 ```
 
 ### Recording Management
 ```bash
 # Start Recording
-curl -X POST http://localhost:3000/api/v1/recordings/start
+curl -X POST http://localhost:3000/api/v1/recordings/{stream_id}/start
+
+# Response
+{
+  "recording_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "stream_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "RECORDING_STARTED",
+  "message": "Recording has been initiated."
+}
 
 # Stop Recording
-curl -X POST http://localhost:3000/api/v1/recordings/stop
+curl -X POST http://localhost:3000/api/v1/recordings/{stream_id}/stop
+
+# Response
+{
+  "recording_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "stream_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "RECORDING_STOPPED",
+  "message": "Recording has been stopped."
+}
 
 # List Recordings
 curl http://localhost:3000/api/v1/recordings
 
+# Response
+[
+  {
+    "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+    "stream_id": "550e8400-e29b-41d4-a716-446655440000",
+    "file_name": "rec_20240314_143000.mp4",
+    "start_time": "2024-03-14T05:30:00Z",
+    "end_time": "2024-03-14T05:45:10Z",
+    "duration_seconds": 910,
+    "file_size_bytes": 546000000
+  }
+]
+
 # Get Recording Details
-curl http://localhost:3000/api/v1/recordings/{id}
+curl http://localhost:3000/api/v1/recordings/{recording_id}
+
+# Response
+{
+  "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "stream_id": "550e8400-e29b-41d4-a716-446655440000",
+  "file_name": "rec_20240314_143000.mp4",
+  "file_path": "/var/data/recordings/rec_20240314_143000.mp4",
+  "start_time": "2024-03-14T05:30:00Z",
+  "end_time": "2024-03-14T05:45:10Z",
+  "duration_seconds": 910,
+  "file_size_bytes": 546000000,
+  "status": "COMPLETED"
+}
 
 # Download Recording
-curl http://localhost:3000/api/v1/recordings/{id}/download
+curl http://localhost:3000/api/v1/recordings/{recording_id}/download
 
 # Delete Recording
-curl -X DELETE http://localhost:3000/api/v1/recordings/{id}
+curl -X DELETE http://localhost:3000/api/v1/recordings/{recording_id}
 ```
+
+## API Usage Notes
+
+1. **Stream Connection**
+   - Connect to a stream before starting recording
+   - Supported protocols: RTSP, WebRTC
+   - Stream ID is required for all stream-specific operations
+
+2. **Recording Management**
+   - Start recording for a specific stream using the stream ID
+   - Stop recording using the stream ID
+   - List all recordings or get details of a specific recording
+   - Download or delete recordings using the recording ID
+
+3. **Troubleshooting**
+   - Check stream status using the debug endpoint
+   - Verify recording file size and content
+   - Check logs for detailed error information
+   - Log command: `docker compose logs record-service --tail=100`
+
+# Note: Recording duration should be at least 10 seconds to ensure proper file generation
+# and moov atom writing. Short recordings (less than 5 seconds) may result in invalid files.
 
 ## API利用時の注意
 
@@ -103,11 +220,11 @@ curl -X DELETE http://localhost:3000/api/v1/recordings/{id}
 ```bash
 curl -X POST http://localhost:3000/api/v1/streams/connect \
   -H "Content-Type: application/json" \
-  -d '{"protocol": "rtsp", "url": "rtsp://192.168.0.18:8554/cam"}'
+  -d '{"protocol": "rtsp", "url": "rtsp://192.168.0.18:8554/cam1"}'
 ```
 2. **録画開始**
 ```bash
-curl -X POST http://localhost:3000/api/v1/recordings/start
+curl -X POST http://localhost:3000/api/v1/streams/{stream_id}/recordings/start
 ```
 
 > 事前にストリーム接続せずに録画開始APIを呼ぶと、
@@ -121,19 +238,19 @@ curl -X POST http://localhost:3000/api/v1/recordings/start
 1. **RTSPストリームの確認**
 ```bash
 # コマンドラインでGStreamerを直接テスト
-./debug-gstreamer.sh rtsp://192.168.0.18:8554/cam
+./debug-gstreamer.sh rtsp://192.168.0.18:8554/cam1
 
 # または手動で実行
-gst-launch-1.0 -e rtspsrc location=rtsp://192.168.0.18:8554/cam latency=0 timeout=20 ! rtph264depay ! h264parse ! mp4mux ! filesink location=/tmp/test.mp4
+gst-launch-1.0 -e rtspsrc location=rtsp://192.168.0.18:8554/cam1 latency=0 timeout=20 ! rtph264depay ! h264parse ! mp4mux ! filesink location=/tmp/test.mp4
 ```
 
 2. **ストリーム状態の詳細確認**
 ```bash
 # 基本ステータス確認
-curl http://localhost:3000/api/v1/streams/status
+curl http://localhost:3000/api/v1/streams/{stream_id}/status
 
 # 詳細デバッグ情報（GStreamerパイプライン状態含む）
-curl http://localhost:3000/api/v1/streams/debug
+curl http://localhost:3000/api/v1/streams/{stream_id}/debug
 ```
 
 3. **よくある原因と対処法**
@@ -160,7 +277,7 @@ docker compose exec record-service nc -vz 192.168.0.18 8554
 ### RTSPストリームの確認
 - RTSPストリームを受信しmp4ファイルが保存されるか確認するためには、以下のコマンドを実行してみてください。
 ```bash
-gst-launch-1.0 -e rtspsrc location=rtsp://192.168.0.18:8554/cam latency=0 ! rtph264depay ! h264parse ! mp4mux ! filesink location=test.mp4
+gst-launch-1.0 -e rtspsrc location=rtsp://192.168.0.18:8554/cam1 latency=0 ! rtph264depay ! h264parse ! mp4mux ! filesink location=test.mp4
 ```
 
 - ファイアウォールやDockerネットワーク設定によっては外部アクセスが制限されている場合があります。

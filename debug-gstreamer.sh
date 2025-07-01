@@ -5,7 +5,7 @@
 
 set -e
 
-RTSP_URL=${1:-"rtsp://192.168.0.18:8554/cam"}
+RTSP_URL=${1:-"rtsp://192.168.0.18:8554/cam1"}
 OUTPUT_FILE="/tmp/test_recording.mp4"
 
 echo "🔍 Testing GStreamer RTSP Pipeline"

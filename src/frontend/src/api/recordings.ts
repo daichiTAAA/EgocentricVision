@@ -2,26 +2,28 @@ import apiClient from '@/lib/axios';
 import type { Recording, RecordingStartRequest } from '@/types/api';
 
 export const recordingsApi = {
-  start: (data?: RecordingStartRequest) =>
-    apiClient.post('/api/v1/recordings/start', data),
+  start: (stream_id: string, data?: RecordingStartRequest) =>
+    apiClient.post(`/api/v1/recordings/${stream_id}/start`, data),
   
-  stop: () =>
-    apiClient.post('/api/v1/recordings/stop'),
+  stop: (stream_id: string) =>
+    apiClient.post(`/api/v1/recordings/${stream_id}/stop`),
   
-  list: (): Promise<{ data: Recording[] }> =>
-    apiClient.get('/api/v1/recordings'),
+  list: (stream_id?: string): Promise<{ data: Recording[] }> =>
+    stream_id
+      ? apiClient.get(`/api/v1/recordings?stream_id=${stream_id}`)
+      : apiClient.get('/api/v1/recordings'),
   
-  get: (id: string): Promise<{ data: Recording }> =>
-    apiClient.get(`/api/v1/recordings/${id}`),
+  get: (recording_id: string): Promise<{ data: Recording }> =>
+    apiClient.get(`/api/v1/recordings/${recording_id}`),
   
-  download: (id: string) =>
-    apiClient.get(`/api/v1/recordings/${id}/download`, {
+  download: (recording_id: string) =>
+    apiClient.get(`/api/v1/recordings/${recording_id}/download`, {
       responseType: 'blob',
       headers: {
         Accept: 'video/mp4'
       }
     }),
   
-  delete: (id: string) =>
-    apiClient.delete(`/api/v1/recordings/${id}`),
+  delete: (recording_id: string) =>
+    apiClient.delete(`/api/v1/recordings/${recording_id}`),
 };

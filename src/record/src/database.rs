@@ -1,8 +1,8 @@
-use sqlx::{PgPool, migrate::MigrateDatabase, Postgres};
-use uuid::Uuid;
-use chrono::{DateTime, Utc};
 use crate::error::RecordError;
 use crate::models::{Recording, RecordingStatus};
+use chrono::{DateTime, Utc};
+use sqlx::{migrate::MigrateDatabase, PgPool, Postgres};
+use uuid::Uuid;
 
 pub struct Database {
     pool: PgPool,
@@ -11,7 +11,10 @@ pub struct Database {
 impl Database {
     pub async fn new(database_url: &str) -> Result<Self, RecordError> {
         // Create database if it doesn't exist
-        if !Postgres::database_exists(database_url).await.unwrap_or(false) {
+        if !Postgres::database_exists(database_url)
+            .await
+            .unwrap_or(false)
+        {
             Postgres::create_database(database_url).await?;
         }
 

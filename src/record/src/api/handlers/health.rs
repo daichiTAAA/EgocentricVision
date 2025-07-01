@@ -1,12 +1,9 @@
-use axum::{
-    extract::State,
-    Json,
-};
-use std::sync::Arc;
-use tracing::info;
 use crate::app::AppState;
 use crate::error::RecordError;
+use axum::{extract::State, Json};
 use serde::Serialize;
+use std::sync::Arc;
+use tracing::info;
 
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
@@ -28,4 +25,4 @@ pub async fn health(
         version: env!("CARGO_PKG_VERSION").to_string(),
         database_connected,
     }))
-} 
+}

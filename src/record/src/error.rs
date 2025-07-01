@@ -1,41 +1,40 @@
-use thiserror::Error;
 use axum::{
     http::StatusCode,
-    response::{Response, IntoResponse},
+    response::{IntoResponse, Response},
     Json,
 };
-use serde_json::json;
 use gstreamer::PadLinkError;
+use serde_json::json;
+use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum RecordError {
     #[error("Configuration error: {0}")]
     ConfigError(String),
-    
+
     #[error("Database error: {0}")]
     DatabaseError(#[from] sqlx::Error),
-    
+
     #[error("Migration error: {0}")]
     MigrationError(#[from] sqlx::migrate::MigrateError),
-    
+
     #[error("Stream error: {0}")]
     StreamError(String),
-    
+
     #[error("Recording not found: {0}")]
     RecordingNotFound(String),
-    
-    #[error("Already recording")]
-    AlreadyRecording,
-    
-    #[error("Not connected to stream")]
-    NotConnected,
-    
+
+    // #[error("Already recording")]
+    // AlreadyRecording, // 未使用のためコメントアウト
+
+    // #[error("Not connected to stream")]
+    // NotConnected,     // 未使用のためコメントアウト
+
     // #[error("Pipeline error: {0}")]
     // PipelineError(String), // 未使用のためコメントアウト
-    
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
-    
+
     #[error("Internal server error: {0}")]
     InternalError(String),
 }
@@ -43,11 +42,9 @@ pub enum RecordError {
 impl IntoResponse for RecordError {
     fn into_response(self) -> Response {
         let (status, error_code, message) = match self {
-            RecordError::ConfigError(msg) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "CONFIG_ERROR",
-                msg,
-            ),
+            RecordError::ConfigError(msg) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "CONFIG_ERROR", msg)
+            }
             RecordError::DatabaseError(err) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "DB_ERROR",
@@ -58,26 +55,22 @@ impl IntoResponse for RecordError {
                 "MIGRATION_ERROR",
                 err.to_string(),
             ),
-            RecordError::StreamError(msg) => (
-                StatusCode::BAD_REQUEST,
-                "STREAM_ERROR",
-                msg,
-            ),
+            RecordError::StreamError(msg) => (StatusCode::BAD_REQUEST, "STREAM_ERROR", msg),
             RecordError::RecordingNotFound(id) => (
                 StatusCode::NOT_FOUND,
                 "RESOURCE_NOT_FOUND",
                 format!("Recording with ID {} not found", id),
             ),
-            RecordError::AlreadyRecording => (
-                StatusCode::CONFLICT,
-                "ALREADY_RECORDING",
-                "Stream is already being recorded".to_string(),
-            ),
-            RecordError::NotConnected => (
-                StatusCode::CONFLICT,
-                "NOT_CONNECTED",
-                "Not connected to stream".to_string(),
-            ),
+            // RecordError::AlreadyRecording => (
+            //     StatusCode::CONFLICT,
+            //     "ALREADY_RECORDING",
+            //     "Stream is already being recorded".to_string(),
+            // ),
+            // RecordError::NotConnected => (
+            //     StatusCode::CONFLICT,
+            //     "NOT_CONNECTED",
+            //     "Not connected to stream".to_string(),
+            // ),
             // RecordError::PipelineError(msg) => (
             //     StatusCode::INTERNAL_SERVER_ERROR,
             //     "PIPELINE_ERROR",

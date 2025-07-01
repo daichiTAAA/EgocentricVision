@@ -4,15 +4,17 @@ mod config;
 mod database;
 mod error;
 mod models;
+mod recording;
 mod stream;
+mod webrtc;
 
 use anyhow::Result;
 use config::Config;
 use database::Database;
+use std::io::stderr;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
-use tracing::{info, error, warn};
-use std::io::stderr;
+use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -23,10 +25,7 @@ async fn main() -> Result<()> {
     }));
 
     // Initialize tracing (stderr明示)
-    tracing_subscriber::fmt()
-        .with_writer(stderr)
-        .json()
-        .init();
+    tracing_subscriber::fmt().with_writer(stderr).json().init();
 
     info!("Starting record service");
 
@@ -51,7 +50,10 @@ async fn main() -> Result<()> {
                 }
                 Err(e) => {
                     if attempts >= max_attempts {
-                        error!("Failed to initialize database after {} attempts: {}", attempts, e);
+                        error!(
+                            "Failed to initialize database after {} attempts: {}",
+                            attempts, e
+                        );
                         return Err(e.into());
                     }
                     warn!(

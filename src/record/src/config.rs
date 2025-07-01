@@ -1,7 +1,10 @@
-use figment::{Figment, providers::{Format, Yaml, Env}};
+use crate::error::RecordError;
+use figment::{
+    providers::{Env, Format, Yaml},
+    Figment,
+};
 use serde::Deserialize;
 use std::path::PathBuf;
-use crate::error::RecordError;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
@@ -47,8 +50,9 @@ impl Config {
 
         // Ensure recording directory exists
         if !config.recording_directory.exists() {
-            std::fs::create_dir_all(&config.recording_directory)
-                .map_err(|e| RecordError::ConfigError(format!("Failed to create recording directory: {}", e)))?;
+            std::fs::create_dir_all(&config.recording_directory).map_err(|e| {
+                RecordError::ConfigError(format!("Failed to create recording directory: {}", e))
+            })?;
         }
 
         Ok(config)

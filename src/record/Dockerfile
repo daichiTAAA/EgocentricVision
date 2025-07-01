@@ -11,6 +11,9 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     git \
     curl \
+    libnice-dev \
+    gstreamer1.0-nice \
+    gstreamer1.0-plugins-bad \
     && rm -rf /var/lib/apt/lists/*
 
 # Update ca-certificates and configure cargo/git for SSL
@@ -65,6 +68,8 @@ RUN apt-get update && apt-get install -y \
     gstreamer1.0-libav \
     gstreamer1.0-plugins-ugly \
     netcat-openbsd \
+    libnice10 \
+    gstreamer1.0-nice \
     && rm -rf /var/lib/apt/lists/*
 
 # Create app user

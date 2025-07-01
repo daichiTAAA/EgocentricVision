@@ -1,96 +1,84 @@
-import React, { useEffect, useRef } from 'react';
-import { Card, CardContent, CardHeader, Typography } from '@mui/material';
+import React, { useEffect, useRef } from "react";
+import { Card, CardContent, Typography } from "@mui/material";
 
 interface StreamPlayerProps {
+  stream_id: string;
   rtspUrl?: string;
 }
 
-export const StreamPlayer: React.FC<StreamPlayerProps> = ({ rtspUrl }) => {
+export const StreamPlayer: React.FC<StreamPlayerProps> = ({
+  stream_id,
+  rtspUrl,
+}) => {
   const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
-    if (!videoRef.current || !rtspUrl) return;
+    if (!videoRef.current || !stream_id) return;
 
-    // RTSP URLをWHEP URLに変換
-    const url = new URL(rtspUrl);
-    const webrtcUrl = `http://${url.hostname}:8889${url.pathname}/whep`;
+    // recordサービスのWebRTCストリームURLを組み立て
+    // 例: http://<recordサービスのホスト>:3000/api/v1/streams/<stream_id>/webrtc/start
+    const recordHost = window.location.hostname; // 必要に応じて環境変数等で変更
+    const webrtcUrl = `http://${recordHost}:3000/api/v1/streams/${stream_id}/webrtc`;
 
-    console.log('Original RTSP URL:', rtspUrl);
-    console.log('Converted WHEP URL:', webrtcUrl);
+    console.log("WebRTC URL:", webrtcUrl);
 
     const pc = new RTCPeerConnection();
-
-    // メディアストリームを設定
-    pc.addTransceiver('video', { direction: 'recvonly' });
-    pc.addTransceiver('audio', { direction: 'recvonly' });
-
-    // オファーを作成
+    pc.addTransceiver("video", { direction: "recvonly" });
+    pc.addTransceiver("audio", { direction: "recvonly" });
     pc.createOffer()
-      .then(offer => pc.setLocalDescription(offer))
+      .then((offer) => pc.setLocalDescription(offer))
       .then(() => {
-        // WHEPエンドポイントにオファーを送信
         return fetch(webrtcUrl, {
-          method: 'POST',
+          method: "POST",
           headers: {
-            'Content-Type': 'application/sdp'
+            "Content-Type": "application/sdp",
           },
-          body: pc.localDescription?.sdp
+          body: pc.localDescription?.sdp,
         });
       })
-      .then(response => {
+      .then((response) => {
         if (!response.ok) {
           throw new Error(`HTTP error! status: ${response.status}`);
         }
         return response.text();
       })
-      .then(answer => {
-        // アンサーを設定
-        return pc.setRemoteDescription(new RTCSessionDescription({
-          type: 'answer',
-          sdp: answer
-        }));
+      .then((answer) => {
+        return pc.setRemoteDescription(
+          new RTCSessionDescription({
+            type: "answer",
+            sdp: answer,
+          })
+        );
       })
-      .catch(error => {
-        console.error('WebRTC error:', error);
+      .catch((error) => {
+        console.error("WebRTC error:", error);
       });
-
-    // ストリームを受信したらビデオ要素に設定
     pc.ontrack = (event) => {
       if (videoRef.current) {
         videoRef.current.srcObject = event.streams[0];
       }
     };
-
     return () => {
       pc.close();
     };
-  }, [rtspUrl]);
+  }, [stream_id]);
 
   return (
-    <Card>
-      <CardHeader title="ストリームプレーヤー" />
+    <Card sx={{ border: "2px solid red", mb: 2 }}>
       <CardContent>
-        {rtspUrl ? (
-          <div style={{ position: 'relative', paddingTop: '56.25%' }}>
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
-              controls
-              style={{
-                position: 'absolute',
-                top: 0,
-                left: 0,
-                width: '100%',
-                height: '100%'
-              }}
-            />
-          </div>
-        ) : (
-          <Typography variant="body1" color="text.secondary">
-            ストリームを接続するとプレーヤーが表示されます
-          </Typography>
-        )}
+        <video
+          ref={videoRef}
+          autoPlay
+          controls
+          style={{ width: "100%", background: "black" }}
+        />
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{ mt: 1, display: "block" }}
+        >
+          StreamPlayer: {stream_id} / {rtspUrl}
+        </Typography>
       </CardContent>
     </Card>
   );
